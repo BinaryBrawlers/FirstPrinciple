@@ -1,0 +1,10 @@
+cognee
+fastapi
+uvicorn[standard]
+mistralai
+tenacity
+aiosqlite
+pydantic>=2
+httpx
+python-dotenv
+pydantic-settings
