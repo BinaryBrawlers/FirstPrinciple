@@ -5,7 +5,7 @@ retrieved from Cognee, questions are generated via the Mistral LLM, and
 difficulty is adapted based on answer correctness (correct → "hard",
 incorrect → "easy").
 
-Requirements: 5.1, 5.2, 5.4, 5.5
+Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 14.2
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from mindforge.config import settings
+from mindforge.models import InterviewResults
 from mindforge.protocol import AnswerEvaluation, InterviewSession
-from mindforge.resilience import safe_recall
+from mindforge.resilience import safe_recall, safe_remember
 
 logger = logging.getLogger("mindforge.agents.interviewer")
 
@@ -124,6 +126,189 @@ class InterviewerAgent:
             concept_id=concept_id,
             difficulty=question["difficulty"],
             correct_answer=question["correct_answer"],
+        )
+
+    async def evaluate_answer(
+        self,
+        question_id: str,
+        learner_answer: str,
+        correct_answer: str,
+        concept_id: str,
+        session_id: str,
+    ) -> AnswerEvaluation:
+        """Evaluate a learner's answer against the model answer using the LLM.
+
+        Persists the evaluation result to Cognee memory for later aggregation
+        by finish_interview, then returns a structured AnswerEvaluation.
+
+        Steps:
+          1. Build an LLM prompt comparing learner_answer to correct_answer.
+          2. Parse the LLM JSON response for correctness and feedback.
+          3. Adapt next-question difficulty (correct → "hard", incorrect → "easy").
+          4. Persist evaluation via safe_remember.
+          5. Return AnswerEvaluation.
+
+        Args:
+            question_id:    Unique ID of the question being answered.
+            learner_answer: The learner's free-text answer.
+            correct_answer: The model answer for comparison.
+            concept_id:     The concept being tested.
+            session_id:     Active session ID for memory persistence.
+
+        Returns:
+            AnswerEvaluation with correctness verdict, feedback, and next difficulty.
+
+        Requirements: 5.3, 14.2
+        """
+        # ── 1. Build LLM user prompt ─────────────────────────────────────────
+        user_content = (
+            f"Concept: {concept_id}\n\n"
+            f"Model answer: {correct_answer}\n\n"
+            f"Learner's answer: {learner_answer}"
+        )
+
+        # ── 2. Call Mistral LLM ──────────────────────────────────────────────
+        correct: bool = False
+        feedback: str = "Could not evaluate answer."
+
+        try:
+            from mistralai import Mistral  # local import — allows testing without SDK
+
+            client = Mistral(api_key=settings.effective_mistral_api_key)
+            response = client.chat.complete(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _ANSWER_EVAL_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            raw: str = response.choices[0].message.content
+
+            try:
+                parsed = json.loads(raw)
+                correct = bool(parsed.get("correct", False))
+                feedback = parsed.get("feedback", feedback)
+            except (json.JSONDecodeError, AttributeError) as parse_exc:
+                logger.warning(
+                    "Failed to parse LLM JSON for answer evaluation of question '%s'; "
+                    "using defaults. Error: %s",
+                    question_id,
+                    parse_exc,
+                )
+
+        except Exception as llm_exc:
+            logger.error(
+                "LLM call failed for answer evaluation of question '%s'; "
+                "using default response. Error: %s",
+                question_id,
+                llm_exc,
+            )
+
+        # ── 3. Adapt difficulty for next question ────────────────────────────
+        next_difficulty = "hard" if correct else "easy"
+
+        # ── 4. Persist evaluation to Cognee memory ───────────────────────────
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
+        try:
+            await safe_remember(
+                data={
+                    "question_id": question_id,
+                    "concept_id": concept_id,
+                    "correct": correct,
+                    "learner_answer": learner_answer,
+                    "timestamp": timestamp,
+                },
+                session_id=session_id,
+            )
+        except Exception as mem_exc:
+            logger.error(
+                "safe_remember failed for answer evaluation of question '%s'. Error: %s",
+                question_id,
+                mem_exc,
+            )
+
+        # ── 5. Return result ─────────────────────────────────────────────────
+        return AnswerEvaluation(
+            correct=correct,
+            feedback=feedback,
+            next_difficulty=next_difficulty,
+        )
+
+    async def finish_interview(
+        self,
+        session_id: str,
+        dataset: str,
+    ) -> InterviewResults:
+        """Aggregate all answer evaluations from the session and compute final score.
+
+        Recalls all answer records stored during the session, counts correct and
+        total answers, then computes score = (correct_count / total) * 100.
+        Weak concepts (those answered incorrectly) are collected for the profile.
+
+        Args:
+            session_id: The interview session to aggregate.
+            dataset:    Cognee dataset scope (used as recall fallback context).
+
+        Returns:
+            InterviewResults with score, totals, and a list of weak concept IDs.
+
+        Requirements: 5.6, 14.2
+        """
+        # ── 1. Recall all answer records from the session ────────────────────
+        answer_records: list = await safe_recall(
+            query_text="interview answer evaluations",
+            session_id=session_id,
+        )
+        logger.debug(
+            "safe_recall returned %d answer record(s) for session '%s'.",
+            len(answer_records),
+            session_id,
+        )
+
+        # ── 2. Tally correct answers and collect weak concepts ───────────────
+        total = 0
+        correct_count = 0
+        weak_concepts: list[str] = []
+
+        for record in answer_records:
+            # Support both dict and object forms.
+            if isinstance(record, dict):
+                is_correct = record.get("correct")
+                concept_id = record.get("concept_id", "")
+            else:
+                is_correct = getattr(record, "correct", None)
+                concept_id = str(getattr(record, "concept_id", "") or "")
+
+            # Only count records that look like answer evaluations (have a
+            # "correct" field); skip unrelated memory entries.
+            if is_correct is None:
+                continue
+
+            total += 1
+            if is_correct:
+                correct_count += 1
+            else:
+                if concept_id and concept_id not in weak_concepts:
+                    weak_concepts.append(concept_id)
+
+        # ── 3. Compute score ─────────────────────────────────────────────────
+        score: float = (correct_count / total * 100.0) if total > 0 else 0.0
+
+        logger.info(
+            "Interview finished for session '%s': score=%.1f%% (%d/%d correct), "
+            "weak_concepts=%s",
+            session_id,
+            score,
+            correct_count,
+            total,
+            weak_concepts,
+        )
+
+        return InterviewResults(
+            score=score,
+            total_questions=total,
+            correct_count=correct_count,
+            weak_concepts=weak_concepts,
         )
 
     async def _generate_question(
