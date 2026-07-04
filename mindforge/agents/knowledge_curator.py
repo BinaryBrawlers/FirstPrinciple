@@ -62,8 +62,8 @@ class KnowledgeCuratorAgent:
     """Agent that ingests content, extracts knowledge, and stores it in Cognee."""
 
     def __init__(self) -> None:
-        # Strip the "mistral/" prefix that Cognee/LiteLLM needs but the
-        # Mistral SDK does not understand.
+        # llm_model_name strips the "mistral/" prefix that Cognee/LiteLLM
+        # needs but the Mistral SDK does not understand.
         raw_model = settings.llm_model
         self._model = raw_model.removeprefix("mistral/")
 
@@ -166,8 +166,16 @@ class KnowledgeCuratorAgent:
         Raises:
             RuntimeError: If the HTTP request fails.
         """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; MindForge/1.0; "
+                "+https://github.com/mindforge) Python/httpx"
+            )
+        }
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            async with httpx.AsyncClient(
+                follow_redirects=True, timeout=30.0, headers=headers
+            ) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.text
@@ -189,7 +197,7 @@ class KnowledgeCuratorAgent:
         try:
             from mistralai import Mistral  # local import to allow testing without the package
 
-            client = Mistral(api_key=settings.mistral_api_key)
+            client = Mistral(api_key=settings.effective_mistral_api_key)
             response = client.chat.complete(
                 model=self._model,
                 messages=[
@@ -250,7 +258,7 @@ class KnowledgeCuratorAgent:
         try:
             from mistralai import Mistral
 
-            client = Mistral(api_key=settings.mistral_api_key)
+            client = Mistral(api_key=settings.effective_mistral_api_key)
             response = client.chat.complete(
                 model=self._model,
                 messages=[

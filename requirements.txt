@@ -2,6 +2,7 @@ cognee
 fastapi
 uvicorn[standard]
 mistralai
+mistral-common[sentencepiece]
 tenacity
 aiosqlite
 pydantic>=2

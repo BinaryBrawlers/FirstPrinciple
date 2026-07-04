@@ -85,9 +85,9 @@ class TeacherAgent:
     """Agent that teaches concepts via the Socratic method using LLM + Cognee memory."""
 
     def __init__(self) -> None:
-        # Strip the "mistral/" prefix that Cognee/LiteLLM needs but the
-        # Mistral SDK does not understand.
-        self._model = settings.llm_model.removeprefix("mistral/")
+        # llm_model_name strips the "mistral/" prefix that Cognee/LiteLLM
+        # needs but the Mistral SDK does not understand.
+        self._model = settings.llm_model_name
 
     # ------------------------------------------------------------------
     # Public API
@@ -147,7 +147,7 @@ class TeacherAgent:
         try:
             from mistralai import Mistral  # local import — allows testing without SDK
 
-            client = Mistral(api_key=settings.mistral_api_key)
+            client = Mistral(api_key=settings.effective_mistral_api_key)
             response = client.chat.complete(
                 model=self._model,
                 messages=[
@@ -252,7 +252,7 @@ class TeacherAgent:
         try:
             from mistralai import Mistral  # local import — allows testing without SDK
 
-            client = Mistral(api_key=settings.mistral_api_key)
+            client = Mistral(api_key=settings.effective_mistral_api_key)
             response = client.chat.complete(
                 model=self._model,
                 messages=[

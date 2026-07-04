@@ -61,8 +61,9 @@ class CurriculumArchitectAgent:
     """
 
     def __init__(self) -> None:
+        # llm_model_name strips the "mistral/" prefix that Cognee/LiteLLM
+        # needs but the Mistral SDK does not understand.
         raw_model = settings.llm_model
-        # Strip the "mistral/" prefix — the Mistral SDK doesn't accept it.
         self._model = raw_model.removeprefix("mistral/")
         # LLM provider attribute for potential future use / feature parity with other agents.
         self.llm_provider: str = settings.llm_provider
@@ -491,7 +492,7 @@ class CurriculumArchitectAgent:
         try:
             from mistralai import Mistral  # local import — not required for all paths
 
-            client = Mistral(api_key=settings.mistral_api_key)
+            client = Mistral(api_key=settings.effective_mistral_api_key)
             response = client.chat.complete(
                 model=self._model,
                 messages=[
