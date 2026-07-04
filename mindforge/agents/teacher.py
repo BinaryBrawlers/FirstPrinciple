@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from mindforge.config import settings
-from mindforge.protocol import TeachingResponse
-from mindforge.resilience import safe_recall
+from mindforge.protocol import EvaluationResult, TeachingResponse
+from mindforge.resilience import safe_recall, safe_remember
 
 logger = logging.getLogger("mindforge.agents.teacher")
 
@@ -53,6 +54,30 @@ Think of it as always taking a small step downhill on a hilly landscape. \
 were set too large?",
   "source": "Deep Learning, Goodfellow et al. (2016)"
 }\
+"""
+
+
+_EVALUATOR_SYSTEM_PROMPT = """\
+You are an evaluator for MindForge. Your role is to assess a learner's response \
+against an expected concept and score their understanding.
+
+Rules:
+1. Score the response as "poor", "partial", or "good":
+   - poor:    The response is incorrect, missing key ideas, or shows fundamental misunderstanding.
+   - partial: The response shows some understanding but is incomplete or has minor errors.
+   - good:    The response is accurate, complete, and demonstrates clear understanding.
+2. Provide brief, constructive feedback (1-2 sentences) explaining the score.
+3. Return ONLY valid JSON (no markdown fences) in this exact schema:
+{
+  "score": <float between 0.0 and 1.0>,
+  "level": "<poor|partial|good>",
+  "feedback": "<1-2 sentence explanation of the evaluation>"
+}
+
+Score mapping guide:
+  poor:    0.0 – 0.39
+  partial: 0.40 – 0.74
+  good:    0.75 – 1.0\
 """
 
 
@@ -166,6 +191,127 @@ class TeacherAgent:
             question=question,
             source=source,
             turn=1,
+        )
+
+    async def evaluate_response(
+        self,
+        learner_response: str,
+        expected_concept: str,
+        session_id: str,
+    ) -> EvaluationResult:
+        """Evaluate a learner's response against an expected concept.
+
+        Retrieves concept context from memory, uses the LLM to score the response,
+        persists the evaluation, and returns a structured result.
+
+        Args:
+            learner_response: The learner's answer or explanation to evaluate.
+            expected_concept: The concept the learner was asked about.
+            session_id:       Active session ID used to persist the evaluation.
+
+        Returns:
+            EvaluationResult with score, feedback, advance flag, and level.
+
+        Requirements: 4.3, 4.4, 4.5, 4.6, 18.2
+        """
+        # ── 1. Recall concept context ────────────────────────────────────────
+        concept_data: list = await safe_recall(
+            query_text=f"concept definition for {expected_concept}",
+            dataset=None,
+        )
+        logger.debug(
+            "safe_recall returned %d concept result(s) for evaluation of '%s'.",
+            len(concept_data),
+            expected_concept,
+        )
+
+        # ── 2. Build user prompt ─────────────────────────────────────────────
+        if concept_data:
+            context_section = _serialize_recall_results(concept_data)
+            user_content = (
+                f"Concept: {expected_concept}\n\n"
+                f"Concept knowledge retrieved from memory:\n{context_section}\n\n"
+                f"Learner's response to evaluate:\n{learner_response}"
+            )
+        else:
+            # Fallback: LLM-only evaluation without graph context (req 18.2)
+            logger.debug(
+                "No concept context found for '%s'; falling back to LLM-only evaluation.",
+                expected_concept,
+            )
+            user_content = (
+                f"Concept: {expected_concept}\n\n"
+                f"Learner's response to evaluate:\n{learner_response}"
+            )
+
+        # ── 3. Call Mistral LLM ──────────────────────────────────────────────
+        level: str = "partial"
+        score: float = 0.5
+        feedback: str = "Could not evaluate response."
+
+        try:
+            from mistralai import Mistral  # local import — allows testing without SDK
+
+            client = Mistral(api_key=settings.mistral_api_key)
+            response = client.chat.complete(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _EVALUATOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            raw: str = response.choices[0].message.content
+
+            # ── 4. Parse structured JSON response ────────────────────────────
+            try:
+                parsed = json.loads(raw)
+                level = parsed.get("level", "partial")
+                if level not in ("poor", "partial", "good"):
+                    level = "partial"
+                score = float(parsed.get("score", 0.5))
+                feedback = parsed.get("feedback", "Could not evaluate response.")
+            except (json.JSONDecodeError, AttributeError, ValueError) as parse_exc:
+                logger.warning(
+                    "Failed to parse LLM JSON response for evaluation of '%s'; "
+                    "using defaults. Error: %s",
+                    expected_concept,
+                    parse_exc,
+                )
+
+        except Exception as llm_exc:
+            logger.error(
+                "LLM call failed for evaluation of '%s'; using default response. Error: %s",
+                expected_concept,
+                llm_exc,
+            )
+            # Fall back to defaults set above.
+
+        # ── 5. Persist evaluation to memory ──────────────────────────────────
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
+        try:
+            await safe_remember(
+                data={
+                    "learner_response": learner_response,
+                    "concept": expected_concept,
+                    "evaluation": score,
+                    "understanding_level": level,
+                    "timestamp": timestamp,
+                },
+                session_id=session_id,
+            )
+        except Exception as mem_exc:
+            logger.error(
+                "safe_remember failed for evaluation of '%s'. Error: %s",
+                expected_concept,
+                mem_exc,
+            )
+
+        # ── 6. Return result ─────────────────────────────────────────────────
+        return EvaluationResult(
+            score=score,
+            feedback=feedback,
+            advance=(level == "good"),
+            level=level,
         )
 
     # ------------------------------------------------------------------
