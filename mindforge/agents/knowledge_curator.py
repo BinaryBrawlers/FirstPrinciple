@@ -108,13 +108,16 @@ class KnowledgeCuratorAgent:
         relationships: List[Relationship] = await self._extract_relationships(concepts)
 
         # ── Persist via Cognee ───────────────────────────────────────────────
+        # Installed Cognee only accepts str/file data, not dict — serialize first.
+        import json as _json
+        payload_str = _json.dumps({
+            "content": text,
+            "concepts": [dataclasses.asdict(c) for c in concepts],
+            "relationships": [dataclasses.asdict(r) for r in relationships],
+            "metadata": source_metadata,
+        }, ensure_ascii=False)
         await safe_remember(
-            data={
-                "content": text,
-                "concepts": [dataclasses.asdict(c) for c in concepts],
-                "relationships": [dataclasses.asdict(r) for r in relationships],
-                "metadata": source_metadata,
-            },
+            data=payload_str,
             dataset=dataset,
             self_improvement=True,
         )

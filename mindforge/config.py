@@ -23,18 +23,17 @@ class Settings(BaseSettings):
     # Get yours at: https://console.mistral.ai/api-keys
     mistral_api_key: str = ""
 
-    # ── Cognee — LLM (Mistral via LiteLLM) ────────────────────────────────────
-    # Cognee routes LLM calls through LiteLLM; the "mistral/" prefix is required.
-    llm_provider: str = "litellm"
-    llm_model: str = "mistral/mistral-small-latest"
-    llm_api_key: str = ""  # set to MISTRAL_API_KEY value in .env
+    # ── Cognee — LLM (Mistral via custom/OpenAI-compatible endpoint) ────────────
+    # "custom" provider + explicit endpoint avoids the mistral_common dependency.
+    llm_provider: str = "custom"
+    llm_model: str = "mistral-small-latest"
+    llm_api_key: str = ""
+    llm_endpoint: str = "https://api.mistral.ai/v1"
 
-    # ── Cognee — Embeddings (Mistral) ─────────────────────────────────────────
-    # mistral-embed is Mistral's dedicated embedding model (1024 dimensions).
-    # IMPORTANT: both LLM and embedding must be configured; if only one is set,
-    # the other silently falls back to OpenAI.
-    embedding_provider: str = "mistral"
+    # ── Cognee — Embeddings (Mistral via custom/OpenAI-compatible endpoint) ──────
+    embedding_provider: str = "custom"
     embedding_model: str = "mistral-embed"
+    embedding_endpoint: str = "https://api.mistral.ai/v1"
     embedding_dimensions: int = 1024
 
     # ── FastAPI server ────────────────────────────────────────────────────────

@@ -79,6 +79,9 @@ async def safe_remember(data: Any, **kwargs: Any) -> Any:
         the failed write to LocalFallbackCache.
     """
     cognee = _get_cognee()
+    # Installed Cognee uses `dataset_name` not `dataset` as the kwarg name.
+    if "dataset" in kwargs and "dataset_name" not in kwargs:
+        kwargs["dataset_name"] = kwargs.pop("dataset")
     try:
         async for attempt in _retry_context():
             with attempt:
