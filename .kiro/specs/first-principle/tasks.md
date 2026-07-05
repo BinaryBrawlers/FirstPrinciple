@@ -230,12 +230,12 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - **Validates: Requirements 8.2**
 
 
-- [ ] 11. LangGraph orchestration
-  - [ ] 11.1 Implement `ingestion_node`, `teacher_node`, `interviewer_node`, and `trait_synthesis_node` wrappers in `backend/chains/langgraph_chains.py`
+- [x] 11. LangGraph orchestration
+  - [x] 11.1 Implement `ingestion_node`, `teacher_node`, `interviewer_node`, and `trait_synthesis_node` wrappers in `backend/chains/langgraph_chains.py`
     - Each node accepts and returns `TutorState`; delegate to the corresponding agent function
     - _Requirements: 9.2_
 
-  - [ ] 11.2 Define Chain 1 (`ingestion_node → teacher_node`) and Chain 2 (`teacher_node/interviewer_node → trait_synthesis_node`) with `RetryPolicy`
+  - [x] 11.2 Define Chain 1 (`ingestion_node → teacher_node`) and Chain 2 (`teacher_node/interviewer_node → trait_synthesis_node`) with `RetryPolicy`
     - Apply `RetryPolicy(max_attempts=3, backoff_factor=2.0)` to every node in both chains
     - Set entry points and edges exactly as specified; do NOT define an Orchestrator agent
     - _Requirements: 9.1, 9.3, 9.4_
@@ -247,24 +247,24 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 9.1_
 
 
-- [ ] 12. FastAPI backend routes
-  - [ ] 12.1 Implement `POST /chat` SSE endpoint in `backend/routers/chat.py`
+- [x] 12. FastAPI backend routes
+  - [x] 12.1 Implement `POST /chat` SSE endpoint in `backend/routers/chat.py`
     - Write `load_or_create_state(user_id, session_id, mode, topic)` and the `token_generator` async generator
     - Return `EventSourceResponse`; begin streaming before full response is generated
     - Do NOT use WebSockets
     - _Requirements: 11.1, 11.3, 11.4_
 
-  - [ ] 12.2 Implement `POST /ingest` endpoint and session lifecycle endpoints in `backend/routers/ingest.py`
+  - [x] 12.2 Implement `POST /ingest` endpoint and session lifecycle endpoints in `backend/routers/ingest.py`
     - Use `BackgroundTasks.add_task(ingestion_agent.run, topic)` and return `{"status": "queued", "topic": topic}`
     - Add session start/end lifecycle endpoints consumed by the frontend
     - _Requirements: 11.2_
 
-  - [ ] 12.3 Wire routers, lifespan hook, and `main.py`
+  - [x] 12.3 Wire routers, lifespan hook, and `main.py`
     - Register all routers in `backend/main.py`
     - Call `seed_tracks_if_absent()` in the FastAPI lifespan startup hook
     - _Requirements: 10.3, 11.1, 11.2_
 
-- [ ] 13. Checkpoint — backend complete
+- [x] 13. Checkpoint — backend complete
   - Ensure all tests pass, ask the user if questions arise.
 
 

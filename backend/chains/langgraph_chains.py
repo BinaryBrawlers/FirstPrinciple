@@ -1,18 +1,18 @@
 """
-LangGraph Chains — Chain 2 (session-end write-back / trait synthesis).
+LangGraph Chains — Chain 1 (ingestion) and Chain 2 (session-end write-back / trait synthesis).
 
-Chain 1 (ingestion_node → teacher_node) is a future task (Task 11) and is
-stubbed here for completeness but NOT compiled or invoked.
+Chain 1 wires:
+  ingestion_node → teacher_node
 
 Chain 2 wires:
-  teacher_node   → trait_synthesis_node
+  teacher_node     → trait_synthesis_node
   interviewer_node → trait_synthesis_node
 
-Entry point is set dynamically at invocation time (see invoke_chain2()).
+Entry point for Chain 2 is set dynamically at invocation time (see invoke_chain2()).
 
 LangGraph RetryPolicy: max_attempts=3, backoff_factor=2.0
 
-Requirements: 8.2
+Requirements: 8.2, 9.2
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING
 from langgraph.graph import StateGraph
 from langgraph.types import RetryPolicy
 
-# agents — trait_synthesis must exist; teacher/interviewer are already present
+# agents
+from agents.ingestion import IngestionAgent
 from agents.trait_synthesis import trait_synthesis_agent
 from models.schemas import TutorState
 
@@ -42,18 +43,42 @@ retry = RetryPolicy(max_attempts=3, backoff_factor=2.0)
 # ---------------------------------------------------------------------------
 
 
+async def ingestion_node(state: TutorState) -> TutorState:
+    """
+    LangGraph node wrapping the Ingestion Agent (Chain 1 entry point).
+
+    Checks ``state["ingest_needed"]``. If True, instantiates IngestionAgent
+    and delegates to ``IngestionAgent.run(topic)`` to decompose the topic,
+    fetch content, and write HistoricalEpisodes to Track A memory.
+
+    After a successful run ``ingest_needed`` is set to False so that
+    downstream nodes and subsequent chain invocations can skip re-ingestion.
+
+    Requirements: 9.2
+    """
+    if state.get("ingest_needed"):
+        agent = IngestionAgent()
+        await agent.run(state["topic"])
+        return {**state, "ingest_needed": False}
+    return state
+
+
 async def teacher_node(state: TutorState) -> TutorState:
     """
     LangGraph node wrapping the Teacher Agent.
 
-    In Chain 2 this node represents the completion of a teacher session.
-    The actual streaming has already happened; here we just pass state through
-    so LangGraph can route to trait_synthesis_node.
+    Chain 1 role: follows ingestion_node — by the time this node executes the
+    topic has been ingested and the session can begin. No work is done here;
+    the actual streaming is handled by the FastAPI SSE layer.
 
-    Requirements: 8.2
+    Chain 2 role: represents the completion of a teacher session. The actual
+    streaming has already happened; here we just pass state through so
+    LangGraph can route to trait_synthesis_node.
+
+    Requirements: 8.2, 9.2
     """
-    # Teacher session work already done by the time Chain 2 fires.
-    # This node is the "after teacher session end" trigger point.
+    # Teacher session streaming is handled by the FastAPI SSE layer.
+    # This node satisfies LangGraph chain topology and carries the RetryPolicy.
     return state
 
 
@@ -61,14 +86,14 @@ async def interviewer_node(state: TutorState) -> TutorState:
     """
     LangGraph node wrapping the Interviewer Agent.
 
-    In Chain 2 this node represents the completion of an interviewer session.
-    The actual streaming has already happened; here we just pass state through
-    so LangGraph can route to trait_synthesis_node.
+    Represents the completion of an interviewer session. The actual streaming
+    has already happened; here we just pass state through so LangGraph can
+    route to trait_synthesis_node.
 
     Requirements: 8.2
     """
-    # Interviewer session work already done by the time Chain 2 fires.
-    # This node is the "after interviewer session end" trigger point.
+    # Interviewer session streaming is handled by the FastAPI SSE layer.
+    # This node satisfies LangGraph chain topology and carries the RetryPolicy.
     return state
 
 
@@ -166,19 +191,57 @@ async def invoke_chain2(
 
 
 # ---------------------------------------------------------------------------
-# Chain 1 stub — topic ingestion (Task 11, not yet implemented)
+# Chain 1 — topic ingestion
+# Triggered when state["ingest_needed"] is True (new topic not yet in Track A)
 # ---------------------------------------------------------------------------
 
-def _build_chain1_stub() -> None:
+def _build_chain1() -> StateGraph:
     """
-    Placeholder for Chain 1 (ingestion_node → teacher_node).
+    Build (but do not compile) the Chain 1 StateGraph.
 
-    Implemented in Task 11. Listed here for architectural completeness.
+    Edges:
+      ingestion_node → teacher_node
+
+    Returns an uncompiled graph; callers must call .compile() before use.
+
+    Requirements: 9.2
     """
-    # chain1 = StateGraph(TutorState)
-    # chain1.add_node("ingestion_node", ingestion_agent, retry=retry)
-    # chain1.add_node("teacher_node",   teacher_agent,   retry=retry)
-    # chain1.add_edge("ingestion_node", "teacher_node")
-    # chain1.set_entry_point("ingestion_node")
-    # return chain1.compile()
-    pass
+    graph = StateGraph(TutorState)
+
+    graph.add_node("ingestion_node", ingestion_node, retry=retry)
+    graph.add_node("teacher_node", teacher_node, retry=retry)
+
+    graph.add_edge("ingestion_node", "teacher_node")
+    graph.set_entry_point("ingestion_node")
+
+    return graph
+
+
+async def invoke_chain1(state: TutorState) -> TutorState:
+    """
+    Compile and invoke Chain 1 (ingestion_node → teacher_node).
+
+    Should be called when ``state["ingest_needed"]`` is True and the topic
+    has not yet been decomposed into HistoricalEpisodes.
+
+    Args:
+        state: The current TutorState.
+
+    Returns:
+        Updated TutorState with ``ingest_needed`` set to False after
+        successful ingestion.
+
+    Requirements: 9.2
+    """
+    graph = _build_chain1()
+    compiled = graph.compile()
+
+    logger.info(
+        "invoke_chain1: invoking Chain 1 for topic=%r user=%r session=%r",
+        state.get("topic"),
+        state.get("user_id"),
+        state.get("session_id"),
+    )
+
+    result: TutorState = await compiled.ainvoke(state)
+    return result
