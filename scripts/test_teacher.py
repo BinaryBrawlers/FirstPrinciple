@@ -49,11 +49,11 @@ _BACKEND = os.path.join(_ROOT, "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-os.environ.setdefault("MISTRAL_API_KEY", "dummy")
-os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
-
 from dotenv import load_dotenv
 load_dotenv(os.path.join(_ROOT, ".env"), override=False)
+
+os.environ.setdefault("MISTRAL_API_KEY", "dummy")
+os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s  %(name)s — %(message)s")
 logging.getLogger("agents.teacher").setLevel(logging.INFO)
