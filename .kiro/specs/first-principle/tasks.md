@@ -7,7 +7,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 ## Tasks
 
 - [ ] 1. Project scaffold and environment configuration
-  - [ ] 1.1 Create directory structure and dependency files
+  - [x] 1.1 Create directory structure and dependency files
     - Create `backend/` and `frontend/` root directories
     - Write `backend/requirements.txt` pinning: `cognee`, `langgraph`, `fastapi`, `uvicorn`, `sse-starlette`, `wikipedia-api`, `arxiv`, `youtube-transcript-api`, `python-dotenv`
     - Write `backend/config.py` that reads `MISTRAL_API_KEY` and sets `COGNEE_SKIP_CONNECTION_TEST=true` via `os.environ` before any cognee import; call `cognee.config.set_llm_provider("mistral")` and `cognee.config.set_embedding_provider("fastembed")`
@@ -16,88 +16,88 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 13.1, 13.2_
 
 - [ ] 2. Data models and schema
-  - [ ] 2.1 Implement `HistoricalEpisode`, `TutorState`, and `TraitStatement` in `backend/models/schemas.py`
+  - [x] 2.1 Implement `HistoricalEpisode`, `TutorState`, and `TraitStatement` in `backend/models/schemas.py`
     - Write `Outcome`, `SourceConfidence` enums and `HistoricalEpisode` dataclass with all required fields
     - Write `TutorState` TypedDict with all nine fields
     - Write `TraitStatement` dataclass
     - _Requirements: 1.1, 3.1_
 
-  - [ ]* 2.2 Write property test for HistoricalEpisode schema completeness
+  - [x] 2.2 Write property test for HistoricalEpisode schema completeness
     - **Property 1: HistoricalEpisode schema completeness**
     - Generate random `HistoricalEpisode` instances via Hypothesis; assert all required fields are present and each value matches its declared type or enum
     - **Validates: Requirements 1.1**
 
-  - [ ]* 2.3 Write unit tests for TutorState defaults and field types
+  - [x] 2.3 Write unit tests for TutorState defaults and field types
     - Verify each field accepts its specified type; verify `nudge_count` initialises to 0
     - _Requirements: 1.1_
 
 
-- [ ] 3. Memory isolation layer (`MemoryGateway`)
-  - [ ] 3.1 Implement `AgentRole` enum and `MemoryGateway` class in `backend/memory/gateway.py`
+- [x] 3. Memory isolation layer (`MemoryGateway`)
+  - [x] 3.1 Implement `AgentRole` enum and `MemoryGateway` class in `backend/memory/gateway.py`
     - Define `_TRACK_A_WRITERS` and `_TRACK_B_WRITERS` sets
     - Implement `add_data_points`, `remember`, `forget`, `improve` with role checks; raise `MemoryAccessError` on violations
     - _Requirements: 14.1, 14.2, 14.3, 14.4_
 
-  - [ ]* 3.2 Write property test for Track A write isolation
+  - [x] 3.2 Write property test for Track A write isolation
     - **Property 4: Track A write isolation**
     - For each role in `{TEACHER, INTERVIEWER, TRAIT_SYNTHESIS}`, construct a `MemoryGateway` and call `add_data_points()`; assert `MemoryAccessError` is raised every time
     - **Validates: Requirements 14.1, 14.4**
 
-  - [ ]* 3.3 Write property test for Track B write isolation
+  - [x] 3.3 Write property test for Track B write isolation
     - **Property 5: Track B write isolation**
     - For each role in `{TEACHER, INTERVIEWER}`, call `remember/forget/improve` on a `user_*` graph name; assert `MemoryAccessError` is always raised
     - **Validates: Requirements 14.2, 14.3, 3.3, 3.4**
 
-  - [ ]* 3.4 Write property test for Track B graph naming invariant
+  - [x] 3.4 Write property test for Track B graph naming invariant
     - **Property 6: Track B graph naming invariant**
     - Generate arbitrary user ID strings; assert the graph name produced equals `"user_" + user_id` exactly
     - **Validates: Requirements 3.1**
 
 
 - [ ] 4. Hand-authored seed episodes
-  - [ ] 4.1 Write OS Memory Management seed episodes in `backend/memory/seed.py`
+  - [x] 4.1 Write OS Memory Management seed episodes in `backend/memory/seed.py`
     - Author six `HistoricalEpisode` dicts in order: base+limit registers → segmentation → external fragmentation (failure) → paging → page tables → MMU/TLB
     - Populate `requires`, `concurrent_with`, `source_confidence`, and `published_date` for each
     - _Requirements: 10.1_
 
-  - [ ] 4.2 Write Deep Learning seed episodes in `backend/memory/seed.py`
+  - [x] 4.2 Write Deep Learning seed episodes in `backend/memory/seed.py`
     - Author nine `HistoricalEpisode` dicts in order: perceptron → XOR failure → MLP → backpropagation → CNN (concurrent: RNN) → vanishing gradient (failure) → LSTM → attention mechanism → Transformer
     - Mark CNN and RNN as `concurrent_with` each other; mark XOR failure and vanishing gradient with `outcome: failure`
     - _Requirements: 10.2_
 
-  - [ ] 4.3 Implement `seed_tracks_if_absent()` lifespan hook in `backend/memory/seed.py`
+  - [x] 4.3 Implement `seed_tracks_if_absent()` lifespan hook in `backend/memory/seed.py`
     - Call `cognee.recall(graph_name="content_track", query=...)` to check existence before writing
     - Call `gateway.add_data_points(episodes, temporal_cognify=True)` then `cognee.consolidate_entity_descriptions_pipeline()` for each topic if absent
     - _Requirements: 10.3, 2.4, 2.5_
 
-  - [ ]* 4.4 Write property test for seed idempotency
+  - [x] 4.4 Write property test for seed idempotency
     - **Property 16: Seed topics are complete and non-duplicated**
     - Call `seed_tracks_if_absent()` twice; assert Track A contains exactly the expected episode IDs with no duplicates
     - **Validates: Requirements 10.1, 10.2, 10.3**
 
-  - [ ]* 4.5 Write unit test for seed episode narrative sort
+  - [x] 4.5 Write unit test for seed episode narrative sort
     - Construct a small mixed-date episode list; assert `narrative_sort()` produces a topologically valid order consistent with `requires` edges
     - _Requirements: 4.5_
 
 
 - [ ] 5. Ingestion Agent
-  - [ ] 5.1 Implement topic decomposition and Wikipedia skeleton pass in `backend/agents/ingestion.py`
+  - [x] 5.1 Implement topic decomposition and Wikipedia skeleton pass in `backend/agents/ingestion.py`
     - Write `decompose_topic(topic)` returning `list[str]` subtopics
     - Write `fetch_wikipedia(subtopic)` returning `list[HistoricalEpisode]` with `source_confidence=named_reference`
     - _Requirements: 4.1, 4.2_
 
-  - [ ] 5.2 Implement arXiv detail pass and YouTube transcript fetch
+  - [x] 5.2 Implement arXiv detail pass and YouTube transcript fetch
     - Write `fetch_arxiv(subtopic)` restricting to abstract and introduction; tag `source_confidence=cited_source`
     - Write `fetch_youtube(video_ids)` using `youtube-transcript-api`; tag `source_confidence=named_reference`
     - _Requirements: 4.2, 4.3, 4.4_
 
-  - [ ] 5.3 Implement `tag_source_confidence()`, `narrative_sort()`, and retry-with-backoff
+  - [x] 5.3 Implement `tag_source_confidence()`, `narrative_sort()`, and retry-with-backoff
     - Write `tag_source_confidence(episodes)` to apply the three-tier tagging rules
     - Write `narrative_sort(episodes)` respecting `requires` edges; use `published_date` as a tiebreaker only
     - Write `fetch_with_retry(fetch_fn, max_attempts=3)` using `asyncio.sleep(2**attempt)` — no tenacity
     - _Requirements: 4.4, 4.5, 4.8_
 
-  - [ ]* 5.4 Write property test for exponential backoff timing
+  - [x] 5.4 Write property test for exponential backoff timing
     - **Property 9: Exponential backoff timing**
     - Mock the clock; for attempt k ∈ {0,1,2}, assert the sleep duration equals 2^k seconds and that `tenacity` is not imported anywhere in the module
     - **Validates: Requirements 4.8**
@@ -109,12 +109,12 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Write `reasoned_fallback(subtopics)` that generates `reasoned`-tier episodes via Mistral; guard with a pre-check to avoid duplication
     - _Requirements: 2.4, 2.5, 4.6, 4.7_
 
-  - [ ]* 5.6 Write property test for reasoned episode idempotency
+  - [ ] 5.6 Write property test for reasoned episode idempotency
     - **Property 3: Reasoned episodes are idempotent per topic**
     - Run `IngestionAgent.run(topic)` twice on a stubbed Track A; assert the set of `reasoned`-tier episode IDs after run 2 equals the set after run 1
     - **Validates: Requirements 1.4, 10.3**
 
-  - [ ]* 5.7 Write property test for retry exhaustion leading to reasoned fallback
+  - [ ] 5.7 Write property test for retry exhaustion leading to reasoned fallback
     - **Property 8: Ingestion retry exhaustion leads to reasoned fallback**
     - Stub `self_check_recall` to always return False; assert at least one `reasoned`-tier episode exists in Track A after the agent completes
     - **Validates: Requirements 4.6, 4.7**
@@ -128,7 +128,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Write `classify_answer(answer, episode)` returning exactly one of `{matched-failure, matched-success, partial, novel}`
     - _Requirements: 5.2_
 
-  - [ ]* 7.2 Write property test for answer classification exhaustiveness
+  - [ ] 7.2 Write property test for answer classification exhaustiveness
     - **Property 10: Answer classification is exhaustive and mutually exclusive**
     - Generate arbitrary (answer_str, episode) pairs; assert classifier returns exactly one value from the four-label set, never null or a combination
     - **Validates: Requirements 5.2**
@@ -139,7 +139,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Reset `nudge_count` to 0 after fallback delivery
     - _Requirements: 5.2, 5.3, 5.4, 5.5, 5.6_
 
-  - [ ]* 7.4 Write property test for two-nudge stuck fallback completeness
+  - [ ] 7.4 Write property test for two-nudge stuck fallback completeness
     - **Property 11: Two-nudge stuck fallback contains all four parts**
     - Generate episodes with `nudge_count=2`; assert fallback response string contains all four sections
     - **Validates: Requirements 5.6**
@@ -150,12 +150,12 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Cross-reference Track B misconceptions; prefer `concurrent_with` siblings aligned with active weak points
     - _Requirements: 5.7, 5.8_
 
-  - [ ]* 7.6 Write property test for `recall()` preceding episode selection
+  - [ ] 7.6 Write property test for `recall()` preceding episode selection
     - **Property 12: recall() precedes episode selection**
     - Instrument `cognee.recall`; assert it is called before `select_next_episode` returns for any valid state
     - **Validates: Requirements 5.7**
 
-  - [ ]* 7.7 Write property test for dependency traversal respecting only `requires` edges
+  - [ ] 7.7 Write property test for dependency traversal respecting only `requires` edges
     - **Property 2: Dependency traversal respects only `requires` edges**
     - Generate random episode DAGs; assert `select_next_episode` order is consistent with a topological sort over `requires` only; adding/removing `concurrent_with` edges SHALL NOT change traversal order
     - **Validates: Requirements 1.2, 1.3**
@@ -166,7 +166,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Implement `async for token in teacher_agent(...)` SSE streaming via `AsyncGenerator`
     - _Requirements: 5.9, 5.10, 5.11, 6.1, 6.2_
 
-  - [ ]* 7.9 Write property test for digest mode not advancing episode position
+  - [ ] 7.9 Write property test for digest mode not advancing episode position
     - **Property 13: Digest mode does not advance episode position**
     - For any transcript input, assert `state["current_episode"]` is identical before and after the digest call
     - **Validates: Requirements 6.1, 6.2**
@@ -183,7 +183,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Write `compute_penalty(grade, confidence_score)` applying `HARSH_MULTIPLIER` when `confidence ∈ {4,5}` and grade is wrong
     - _Requirements: 7.4, 7.5, 7.6_
 
-  - [ ]* 8.3 Write property test for confidently-wrong penalty being strictly harsher
+  - [ ] 8.3 Write property test for confidently-wrong penalty being strictly harsher
     - **Property 14: Confidently-wrong penalty is strictly harsher**
     - For any wrong answer, assert `penalty(wrong, confidence=4) > penalty(wrong, confidence=1)` and `penalty(wrong, confidence=5) > penalty(wrong, confidence=2)`
     - **Validates: Requirements 7.6**
@@ -204,7 +204,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Skip any concept with fewer than two evidence signals (multi-evidence rule)
     - _Requirements: 8.1, 8.3, 3.6_
 
-  - [ ]* 10.2 Write property test for multi-evidence requirement before `remember()`
+  - [ ] 10.2 Write property test for multi-evidence requirement before `remember()`
     - **Property 7: Multi-evidence requirement before remember()**
     - Generate trace maps with varying evidence counts; assert `gateway.remember()` is never called when evidence count < 2
     - **Validates: Requirements 3.6, 8.3**
@@ -221,7 +221,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Trigger on mode switch (application layer emits `mode_switch` event invoking Chain 2)
     - _Requirements: 8.2_
 
-  - [ ]* 10.5 Write property test for trait synthesis triggers only at defined points
+  - [ ] 10.5 Write property test for trait synthesis triggers only at defined points
     - **Property 15: Trait Synthesis triggers only at the three defined points**
     - Instrument the agent; simulate full session lifecycles; assert invocation count equals the number of trigger events fired and zero otherwise
     - **Validates: Requirements 8.2**
@@ -237,7 +237,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Set entry points and edges exactly as specified; do NOT define an Orchestrator agent
     - _Requirements: 9.1, 9.3, 9.4_
 
-  - [ ]* 11.3 Write unit tests for LangGraph chain dispatch logic
+  - [ ] 11.3 Write unit tests for LangGraph chain dispatch logic
     - Assert Chain 1 is compiled when topic is absent from Track A
     - Assert Chain 2 is compiled on session-end signal
     - Assert mid-session turns bypass LangGraph and invoke agents directly
@@ -287,7 +287,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - `MessageList` renders each message with an episode-match tag where `episode_id` is present in the SSE payload
     - _Requirements: 12.2, 12.3, 12.4_
 
-  - [ ]* 15.2 Write unit tests for `ModeToggle` state flip
+  - [ ] 15.2 Write unit tests for `ModeToggle` state flip
     - Assert `TutorState.mode` (reflected in component state) toggles correctly between `teacher` and `interviewer`
     - _Requirements: 12.3_
 
