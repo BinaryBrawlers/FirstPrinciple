@@ -201,8 +201,8 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
   - Ensure all tests pass, ask the user if questions arise.
 
 
-- [ ] 10. Trait Synthesis Agent
-  - [ ] 10.1 Implement trace reading, evidence grouping, and multi-evidence rule in `backend/agents/trait_synthesis.py`
+- [x] 10. Trait Synthesis Agent
+  - [x] 10.1 Implement trace reading, evidence grouping, and multi-evidence rule in `backend/agents/trait_synthesis.py`
     - Call `cognee.recall_agent_memory_traces(state["session_id"])` and group by concept via `group_traces_by_concept`
     - Skip any concept with fewer than two evidence signals (multi-evidence rule)
     - _Requirements: 8.1, 8.3, 3.6_
@@ -212,13 +212,13 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Generate trace maps with varying evidence counts; assert `gateway.remember()` is never called when evidence count < 2
     - **Validates: Requirements 3.6, 8.3**
 
-  - [ ] 10.3 Implement `remember`, `improve`, and `forget` dispatch logic
+  - [x] 10.3 Implement `remember`, `improve`, and `forget` dispatch logic
     - For resolved evidence: call `gateway.forget(graph_name, existing_trait.id)` if trait exists
     - For updated evidence: call `gateway.improve(graph_name, existing_trait.id, feedback=...)` via `add_feedback()`
     - For new evidence (≥2 signals, no existing trait): call `gateway.remember(graph_name, trait)`
     - _Requirements: 3.2, 3.7, 3.8, 8.4, 8.5_
 
-  - [ ] 10.4 Wire Trait Synthesis Agent to the three trigger points
+  - [x] 10.4 Wire Trait Synthesis Agent to the three trigger points
     - Trigger after Teacher session end (Chain 2: `teacher_node → trait_synthesis_node`)
     - Trigger after Interviewer session end (Chain 2: `interviewer_node → trait_synthesis_node`)
     - Trigger on mode switch (application layer emits `mode_switch` event invoking Chain 2)
