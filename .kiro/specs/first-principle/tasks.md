@@ -80,7 +80,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 4.5_
 
 
-- [ ] 5. Ingestion Agent
+- [x] 5. Ingestion Agent
   - [x] 5.1 Implement topic decomposition and Wikipedia skeleton pass in `backend/agents/ingestion.py`
     - Write `decompose_topic(topic)` returning `list[str]` subtopics
     - Write `fetch_wikipedia(subtopic)` returning `list[HistoricalEpisode]` with `source_confidence=named_reference`
@@ -102,7 +102,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Mock the clock; for attempt k ∈ {0,1,2}, assert the sleep duration equals 2^k seconds and that `tenacity` is not imported anywhere in the module
     - **Validates: Requirements 4.8**
 
-  - [ ] 5.5 Implement `add_data_points` call, self-check recall, and reasoned fallback
+  - [x] 5.5 Implement `add_data_points` call, self-check recall, and reasoned fallback
     - After `narrative_sort`, call `gateway.add_data_points(episodes, temporal_cognify=True)`
     - Call `cognee.consolidate_entity_descriptions_pipeline()` after ingestion
     - Write `self_check_recall(topic)` returning bool; retry up to 3 total on failure

@@ -501,11 +501,8 @@ async def fetch_with_retry(fetch_fn: Callable, max_attempts: int = 3):
 
 class IngestionAgent:
     """
-    Orchestrates topic decomposition and source fetching to produce a list of
-    HistoricalEpisode objects.
-
-    This is a skeleton implementation for tasks 5.1-5.2; cognee writes
-    are added in task 5.5.
+    Orchestrates topic decomposition, source fetching, Track A ingestion,
+    and self-check recall to produce a list of HistoricalEpisode objects.
     """
 
     def __init__(self) -> None:
@@ -517,12 +514,21 @@ class IngestionAgent:
         video_ids: list[str] | None = None,
     ) -> list[HistoricalEpisode]:
         """
-        Decompose *topic* into subtopics, fetch Wikipedia and arXiv content for
-        each subtopic, optionally fetch YouTube transcripts for *video_ids*, and
-        return the collected HistoricalEpisode objects.
-
-        cognee writes (Track A) will be added in task 5.5.
+        Full pipeline:
+        1. decompose_topic → subtopics
+        2. For each subtopic: fetch_wikipedia + fetch_arxiv
+        3. Optionally fetch_youtube
+        4. tag_source_confidence(all_episodes)
+        5. narrative_sort(all_episodes) → sorted_episodes
+        6. Retry loop (max 3 attempts):
+           a. gateway.add_data_points(sorted_episodes, temporal_cognify=True)
+           b. cognee.consolidate_entity_descriptions_pipeline()
+           c. self_check_recall(topic) → if True, break; else continue
+        7. If all 3 attempts fail: reasoned_fallback(subtopics)
+        8. Return final episodes list
         """
+        import cognee  # noqa: PLC0415 — imported here; config already applied above
+
         logger.info("IngestionAgent.run: topic=%r", topic)
         subtopics = await decompose_topic(topic)
         logger.info("Decomposed %r into %d subtopics: %s", topic, len(subtopics), subtopics)
@@ -554,7 +560,209 @@ class IngestionAgent:
                 len(video_ids),
             )
 
-        return all_episodes
+        # Tag and sort
+        tag_source_confidence(all_episodes)
+        sorted_episodes = narrative_sort(all_episodes)
+
+        # Retry loop — up to 3 total attempts to write and verify recall
+        _MAX_ATTEMPTS = 3
+        recalled = False
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            logger.info(
+                "IngestionAgent.run: write attempt %d/%d for topic %r",
+                attempt, _MAX_ATTEMPTS, topic,
+            )
+            await self.gateway.add_data_points(sorted_episodes, temporal_cognify=True)
+
+            try:
+                await cognee.consolidate_entity_descriptions_pipeline()
+            except AttributeError:
+                logger.warning(
+                    "cognee.consolidate_entity_descriptions_pipeline() is not available "
+                    "in the installed version; skipping."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "consolidate_entity_descriptions_pipeline raised an unexpected error: %s",
+                    exc,
+                )
+
+            recalled = await self.self_check_recall(topic)
+            if recalled:
+                logger.info(
+                    "IngestionAgent.run: recall verified on attempt %d for topic %r",
+                    attempt, topic,
+                )
+                break
+            else:
+                logger.warning(
+                    "IngestionAgent.run: recall check failed on attempt %d for topic %r",
+                    attempt, topic,
+                )
+
+        if not recalled:
+            logger.warning(
+                "IngestionAgent.run: all %d recall attempts failed for topic %r; "
+                "running reasoned_fallback",
+                _MAX_ATTEMPTS, topic,
+            )
+            fallback_episodes = await self.reasoned_fallback(subtopics)
+            sorted_episodes = sorted_episodes + fallback_episodes
+
+        return sorted_episodes
+
+    # ------------------------------------------------------------------
+    # self_check_recall
+    # ------------------------------------------------------------------
+
+    async def self_check_recall(self, topic: str) -> bool:
+        """Call cognee.recall() to verify ingested episodes are surfaced."""
+        try:
+            import cognee  # noqa: PLC0415
+            results = await cognee.recall(topic)
+            return bool(results)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("self_check_recall failed for %r: %s", topic, exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # reasoned_fallback
+    # ------------------------------------------------------------------
+
+    async def reasoned_fallback(
+        self, subtopics: list[str]
+    ) -> list[HistoricalEpisode]:
+        """
+        Generate ``reasoned``-tier HistoricalEpisode objects for subtopics
+        that have no existing reasoned coverage in cognee.
+
+        For each subtopic:
+        1. Pre-check: if cognee.recall(subtopic) returns any results whose
+           source_confidence is REASONED, skip that subtopic (avoid duplication).
+        2. Otherwise, use the LLM to generate 1-3 reasoned episodes.
+        3. Tag all generated episodes with source_confidence=SourceConfidence.REASONED.
+        4. Write the batch to Track A via gateway.add_data_points.
+        5. Return the full list of generated episodes.
+        """
+        import cognee  # noqa: PLC0415
+
+        generated: list[HistoricalEpisode] = []
+
+        for subtopic in subtopics:
+            # Pre-check: skip if reasoned episodes already exist
+            try:
+                existing = await cognee.recall(subtopic)
+                has_reasoned = any(
+                    getattr(item, "source_confidence", None) == SourceConfidence.REASONED
+                    or getattr(item, "source_confidence", None) == "reasoned"
+                    for item in (existing or [])
+                )
+                if has_reasoned:
+                    logger.info(
+                        "reasoned_fallback: reasoned episodes already exist for %r; skipping",
+                        subtopic,
+                    )
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "reasoned_fallback: pre-check recall failed for %r: %s; proceeding anyway",
+                    subtopic, exc,
+                )
+
+            # Generate episodes via LLM
+            system_prompt = (
+                "You are a first-principles reasoning assistant. "
+                "Given a technical or scientific subtopic, reason from first principles "
+                "to construct plausible historical problem-solving episodes. "
+                "Respond with ONLY a JSON array (no markdown, no extra text) of 1–3 objects, "
+                "each with these fields:\n"
+                '  "concept": str\n'
+                '  "problem_posed": str\n'
+                '  "attempted_solution": str\n'
+                '  "outcome": "success" | "failure" | "partial"\n'
+                '  "why": str\n'
+                '  "published_date": "YYYY-MM-DD" or null\n'
+                "These are reasoned reconstructions, not sourced facts."
+            )
+            user_prompt = (
+                f"Subtopic: {subtopic}\n\n"
+                "Generate 1–3 first-principles problem-solving episodes as a JSON array."
+            )
+
+            try:
+                response = await litellm.acompletion(
+                    model=_LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.4,
+                )
+                content: str = response.choices[0].message.content or ""
+                content = content.strip()
+                if content.startswith("```"):
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                    content = content.strip()
+
+                raw_episodes = json.loads(content)
+                if not isinstance(raw_episodes, list):
+                    raise ValueError("Expected a JSON array")
+
+                slug = subtopic.lower().replace(" ", "_")
+                for i, ep in enumerate(raw_episodes):
+                    episode = HistoricalEpisode(
+                        id=f"reasoned_{slug}_{uuid.uuid4().hex[:8]}_{i}",
+                        concept=ep.get("concept", subtopic),
+                        problem_posed=ep.get("problem_posed", ""),
+                        attempted_solution=ep.get("attempted_solution", ""),
+                        outcome=_parse_outcome(ep.get("outcome", "partial")),
+                        why=ep.get("why", ""),
+                        source_confidence=SourceConfidence.REASONED,
+                        source=None,
+                        published_date=_parse_date(ep.get("published_date")),
+                    )
+                    generated.append(episode)
+                    logger.info(
+                        "reasoned_fallback: generated episode %r for subtopic %r",
+                        episode.id, subtopic,
+                    )
+
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "reasoned_fallback: LLM generation failed for subtopic %r: %s",
+                    subtopic, exc,
+                )
+                # Minimal fallback episode so the pipeline never returns empty-handed
+                generated.append(
+                    HistoricalEpisode(
+                        id=f"reasoned_{subtopic.lower().replace(' ', '_')}_{uuid.uuid4().hex[:8]}",
+                        concept=subtopic,
+                        problem_posed=f"Understanding {subtopic} from first principles",
+                        attempted_solution=(
+                            f"Reasoned reconstruction of the foundational challenges in {subtopic}."
+                        ),
+                        outcome=Outcome.PARTIAL,
+                        why="Generated via reasoned fallback; LLM was unavailable.",
+                        source_confidence=SourceConfidence.REASONED,
+                        source=None,
+                    )
+                )
+
+        if generated:
+            try:
+                await self.gateway.add_data_points(generated, temporal_cognify=True)
+                logger.info(
+                    "reasoned_fallback: wrote %d reasoned episode(s) to Track A",
+                    len(generated),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "reasoned_fallback: failed to write episodes to Track A: %s", exc
+                )
+
+        return generated
 
 
 # ---------------------------------------------------------------------------
