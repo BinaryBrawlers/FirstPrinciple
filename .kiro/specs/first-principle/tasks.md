@@ -135,7 +135,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Generate arbitrary (answer_str, episode) pairs; assert classifier returns exactly one value from the four-label set, never null or a combination
     - **Validates: Requirements 5.2**
 
-  - [ ] 7.3 Implement Socratic branching logic and stuck fallback
+  - [x] 7.3 Implement Socratic branching logic and stuck fallback
     - Implement `on_user_answer(state, answer)` branching on classification: acknowledge parallel, targeted follow-up, novel redirect
     - Implement `stuck_fallback(episode)` producing all four required sections (Problem framing, Solution hint, Engineering Insight, Historical note) when `nudge_count >= 2`
     - Reset `nudge_count` to 0 after fallback delivery
@@ -146,7 +146,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Generate episodes with `nudge_count=2`; assert fallback response string contains all four sections
     - **Validates: Requirements 5.6**
 
-  - [ ] 7.5 Implement `select_next_episode` with Track B recall
+  - [x] 7.5 Implement `select_next_episode` with Track B recall
     - Call `cognee.recall(graph_name=f"user_{user_id}_traits")` before computing next episode
     - Traverse `requires` edges for mandatory candidates; filter resolved episodes from `answer_history`
     - Cross-reference Track B misconceptions; prefer `concurrent_with` siblings aligned with active weak points

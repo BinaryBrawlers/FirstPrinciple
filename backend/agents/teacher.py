@@ -6,19 +6,27 @@ to apply the LiteLLM patch and set COGNEE_SKIP_CONNECTION_TEST.
 
 Task 7.1: Answer classifier
   classify_answer(answer, episode) -> Literal["matched-failure", "matched-success", "partial", "novel"]
+
+Task 7.3: Socratic branching logic and stuck fallback
+  on_user_answer(state, answer, episode) -> AsyncGenerator[str, None]
+  stuck_fallback(episode) -> AsyncGenerator[str, None]
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Literal
+from typing import TYPE_CHECKING, AsyncGenerator, Literal
 
 # --- config MUST come before any cognee import ---
 import config  # noqa: F401
 
+import cognee
 import litellm
 
 from models.schemas import HistoricalEpisode, Outcome
+
+if TYPE_CHECKING:
+    from models.schemas import TutorState
 
 logger = logging.getLogger(__name__)
 
@@ -194,3 +202,483 @@ async def classify_answer(
     label = _heuristic_classify(answer.strip(), episode)
     logger.debug("classify_answer: heuristic returned label %r", label)
     return label
+
+
+# ---------------------------------------------------------------------------
+# Prompt-building helpers (non-streaming, for internal use)
+# ---------------------------------------------------------------------------
+
+def _build_acknowledge_parallel_prompt(
+    classification: ClassificationLabel,
+    episode: HistoricalEpisode,
+    answer: str,
+) -> str:
+    """
+    Build a prompt asking the LLM to acknowledge that the learner has arrived
+    at the same approach as the historical researcher (matched-failure or
+    matched-success).
+
+    Requirements: 5.3
+    """
+    outcome_word = "failure" if classification == "matched-failure" else "success"
+    return (
+        f"You are a Socratic tutor guiding a learner through historical problem-solving.\n\n"
+        f"Episode: {episode.concept}\n"
+        f"Problem posed: {episode.problem_posed}\n"
+        f"Historical approach: {episode.attempted_solution}\n"
+        f"Historical outcome: {outcome_word}\n"
+        f"Why: {episode.why}\n"
+        f"Source: {episode.source or 'historical record'}\n\n"
+        f"The learner answered: {answer}\n\n"
+        f"Their answer matches the historical {outcome_word} approach. "
+        "Acknowledge warmly that they have arrived at the same idea as the historical "
+        "researcher(s) involved. "
+        "If it is a failure outcome, briefly explain what went wrong historically "
+        "and why this was still a meaningful step forward. "
+        "If it is a success outcome, celebrate the insight and briefly explain why "
+        "this approach succeeded. "
+        "Keep your response concise (2-4 sentences). Do not reveal what comes next."
+    )
+
+
+def _build_targeted_followup_prompt(
+    episode: HistoricalEpisode,
+    answer: str,
+) -> str:
+    """
+    Build a prompt for a targeted Socratic follow-up question when the answer
+    is partial — nudge toward the full solution without revealing it.
+
+    Requirements: 5.4
+    """
+    return (
+        f"You are a Socratic tutor guiding a learner through historical problem-solving.\n\n"
+        f"Episode: {episode.concept}\n"
+        f"Problem posed: {episode.problem_posed}\n"
+        f"Historical approach: {episode.attempted_solution}\n"
+        f"Why it matters: {episode.why}\n\n"
+        f"The learner answered: {answer}\n\n"
+        "Their answer is on the right track but incomplete. "
+        "Ask a single targeted Socratic follow-up question that nudges them toward "
+        "the complete historical solution without revealing it directly. "
+        "The question should be specific to the gap in their answer. "
+        "Do NOT give the answer. Keep your response to 1-2 sentences."
+    )
+
+
+def _build_novel_redirect_prompt(
+    episode: HistoricalEpisode,
+    answer: str,
+) -> str:
+    """
+    Build a prompt that acknowledges a novel approach, briefly evaluates its
+    historical merit, and redirects toward the canonical historical thread.
+
+    Requirements: 5.5
+    """
+    return (
+        f"You are a Socratic tutor guiding a learner through historical problem-solving.\n\n"
+        f"Episode: {episode.concept}\n"
+        f"Problem posed: {episode.problem_posed}\n"
+        f"Historical approach: {episode.attempted_solution}\n"
+        f"Historical outcome: {episode.outcome.value}\n"
+        f"Why: {episode.why}\n\n"
+        f"The learner proposed a novel approach not seen in the historical record: {answer}\n\n"
+        "1. Acknowledge their creativity and briefly evaluate the historical merit of "
+        "their novel approach (1-2 sentences — is it viable, does it have precedent elsewhere?). "
+        "2. Then redirect them toward the canonical historical thread by asking "
+        "a Socratic question about the approach researchers actually took. "
+        "Keep the full response to 3-4 sentences."
+    )
+
+
+def _build_stuck_fallback_prompt(episode: HistoricalEpisode) -> str:
+    """
+    Build a prompt that produces a structured fallback response with all four
+    required sections when the learner has been stuck for two nudges.
+
+    Requirements: 5.6
+    """
+    return (
+        f"You are a Socratic tutor. A learner has been stuck on the following episode "
+        f"after two attempts. Provide a structured response with EXACTLY these four "
+        f"sections, each labelled with the bold header shown:\n\n"
+        f"**Problem framing** — Restate the core problem this episode addresses "
+        f"in 1-2 clear sentences.\n\n"
+        f"**Solution hint** — Give a gentle hint toward the historical solution "
+        f"without revealing the full answer (1-2 sentences).\n\n"
+        f"**Engineering Insight** — State the deeper engineering principle or "
+        f"insight behind the solution (1-2 sentences).\n\n"
+        f"**Historical note** — Provide brief historical context: who solved this, "
+        f"when, and why it mattered (1-2 sentences).\n\n"
+        f"Episode details:\n"
+        f"Concept: {episode.concept}\n"
+        f"Problem posed: {episode.problem_posed}\n"
+        f"Historical approach: {episode.attempted_solution}\n"
+        f"Outcome: {episode.outcome.value}\n"
+        f"Why it matters: {episode.why}\n"
+        f"Source: {episode.source or 'historical record'}\n"
+        f"Date: {episode.published_date or 'unknown'}\n\n"
+        "Output all four sections in order. Each section MUST appear with its bold header."
+    )
+
+
+# ---------------------------------------------------------------------------
+# stuck_fallback
+# ---------------------------------------------------------------------------
+
+async def stuck_fallback(episode: HistoricalEpisode) -> AsyncGenerator[str, None]:
+    """
+    Deliver a structured fallback response covering all four required sections:
+    Problem framing, Solution hint, Engineering Insight, Historical note.
+
+    Called when nudge_count >= 2. The caller is responsible for resetting
+    nudge_count to 0 after consuming this generator.
+
+    Requirements: 5.6
+    """
+    prompt = _build_stuck_fallback_prompt(episode)
+    try:
+        response = await litellm.acompletion(
+            model=_LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful Socratic tutor. When asked to produce a "
+                        "structured fallback, always include all four labelled sections "
+                        "in the exact order requested."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            stream=True,
+            temperature=0.4,
+            max_tokens=600,
+        )
+        async for chunk in response:
+            token: str = chunk.choices[0].delta.content or ""
+            if token:
+                yield token
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stuck_fallback: LLM streaming failed (%s); yielding static fallback", exc)
+        # Graceful static fallback so the caller always gets something
+        yield (
+            f"**Problem framing** — {episode.problem_posed}\n\n"
+            f"**Solution hint** — Consider the core idea behind: {episode.attempted_solution[:80]}...\n\n"
+            f"**Engineering Insight** — {episode.why}\n\n"
+            f"**Historical note** — This is recorded as a {episode.outcome.value} outcome"
+            + (f" ({episode.source})" if episode.source else "") + "."
+        )
+
+
+# ---------------------------------------------------------------------------
+# select_next_episode  (Track B recall + requires/concurrent_with traversal)
+# ---------------------------------------------------------------------------
+
+def _extract_misconception_concepts(traits: object) -> list[str]:
+    """
+    Extract active misconception concept strings from whatever cognee.recall()
+    returns.  Handles None, empty list, TraitStatement dataclasses, or generic
+    objects gracefully — never raises.
+    """
+    if traits is None:
+        return []
+
+    if not isinstance(traits, (list, tuple)):
+        # Could be a single object — wrap it so the loop below works
+        traits = [traits]
+
+    concepts: list[str] = []
+    for t in traits:
+        # Prefer duck-typed attribute access (works for TraitStatement and
+        # any cognee-internal wrapper with the same field names)
+        trait_type = getattr(t, "trait_type", None)
+        resolved = getattr(t, "resolved", False)
+        concept = getattr(t, "concept", None)
+        if (
+            trait_type == "misconception"
+            and not resolved
+            and isinstance(concept, str)
+            and concept.strip()
+        ):
+            concepts.append(concept.strip())
+
+    return concepts
+
+
+def _misconception_score(episode: HistoricalEpisode, misconceptions: list[str]) -> int:
+    """
+    Count how many active misconception concepts appear (case-insensitive
+    substring match) in the episode's concept field.
+    """
+    if not misconceptions:
+        return 0
+    ep_concept_lower = episode.concept.lower()
+    return sum(1 for m in misconceptions if m.lower() in ep_concept_lower)
+
+
+async def select_next_episode(
+    state: "TutorState",
+    all_episodes: list[HistoricalEpisode],
+) -> "HistoricalEpisode | None":
+    """
+    Select the best next episode for the learner, using Track B recall to
+    cross-reference active misconceptions and ``requires`` / ``concurrent_with``
+    edges for traversal order.
+
+    Priority (highest → lowest):
+    1. Unresolved mandatory prerequisites of the current episode
+       (current_episode.requires entries not yet resolved)
+    2. Natural next-step episodes that list the current episode in their own
+       ``requires`` field
+    3. ``concurrent_with`` siblings of the current episode
+    4. Any other unresolved episode in all_episodes
+
+    Within each priority tier, episodes are sorted by misconception overlap
+    score (descending) so that active weak points are addressed first.
+
+    Returns None when all episodes are resolved (session complete).
+
+    Requirements: 5.7, 5.8
+    """
+    # --- 1. Call cognee.recall() FIRST (Requirement 5.7) ---
+    traits = None
+    try:
+        traits = await cognee.recall(graph_name=f"user_{state['user_id']}_traits")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("select_next_episode: cognee.recall() failed (%s); proceeding without traits", exc)
+
+    misconceptions = _extract_misconception_concepts(traits)
+    logger.debug(
+        "select_next_episode: Track B recall returned %d active misconception(s): %r",
+        len(misconceptions),
+        misconceptions,
+    )
+
+    # --- 2. Build resolved episode ID set from answer_history ---
+    resolved_ids: set[str] = {
+        entry["episode_id"]
+        for entry in state.get("answer_history", [])
+        if entry.get("classification") == "matched-success"
+    }
+
+    # --- 3. Build episode lookup map ---
+    episode_map: dict[str, HistoricalEpisode] = {ep.id: ep for ep in all_episodes}
+
+    # --- 4. Find current episode object ---
+    current_ep = episode_map.get(state.get("current_episode", ""))
+    if current_ep is None:
+        # Fallback: first unresolved episode
+        for ep in all_episodes:
+            if ep.id not in resolved_ids:
+                logger.debug(
+                    "select_next_episode: current episode not found; falling back to first unresolved: %s",
+                    ep.id,
+                )
+                return ep
+        logger.debug("select_next_episode: all episodes resolved (fallback path)")
+        return None
+
+    # --- 5. Mandatory prerequisites (requires of current not yet resolved) ---
+    mandatory_prereqs: list[HistoricalEpisode] = [
+        episode_map[ep_id]
+        for ep_id in current_ep.requires
+        if ep_id in episode_map and ep_id not in resolved_ids
+    ]
+
+    # --- 6. Natural next steps (episodes that require the current one) ---
+    natural_next: list[HistoricalEpisode] = [
+        ep
+        for ep in all_episodes
+        if current_ep.id in ep.requires and ep.id not in resolved_ids
+    ]
+
+    # --- 7. concurrent_with siblings (secondary candidates) ---
+    concurrent_siblings: list[HistoricalEpisode] = [
+        episode_map[ep_id]
+        for ep_id in current_ep.concurrent_with
+        if ep_id in episode_map and ep_id not in resolved_ids
+    ]
+
+    # --- 8. Score and sort each tier by misconception overlap ---
+    def sort_by_score(candidates: list[HistoricalEpisode]) -> list[HistoricalEpisode]:
+        return sorted(
+            candidates,
+            key=lambda ep: _misconception_score(ep, misconceptions),
+            reverse=True,
+        )
+
+    mandatory_prereqs = sort_by_score(mandatory_prereqs)
+    natural_next = sort_by_score(natural_next)
+    concurrent_siblings = sort_by_score(concurrent_siblings)
+
+    # --- 9. Selection priority ---
+    # Priority 1: unresolved mandatory prerequisites
+    if mandatory_prereqs:
+        chosen = mandatory_prereqs[0]
+        logger.debug(
+            "select_next_episode: selected mandatory prerequisite %s (score=%d)",
+            chosen.id,
+            _misconception_score(chosen, misconceptions),
+        )
+        return chosen
+
+    # Priority 2: natural next-step episodes
+    if natural_next:
+        chosen = natural_next[0]
+        logger.debug(
+            "select_next_episode: selected natural next step %s (score=%d)",
+            chosen.id,
+            _misconception_score(chosen, misconceptions),
+        )
+        return chosen
+
+    # Priority 3: concurrent_with siblings
+    if concurrent_siblings:
+        chosen = concurrent_siblings[0]
+        logger.debug(
+            "select_next_episode: selected concurrent sibling %s (score=%d)",
+            chosen.id,
+            _misconception_score(chosen, misconceptions),
+        )
+        return chosen
+
+    # Priority 4: any other unresolved episode (fallback)
+    presented_or_resolved = resolved_ids | {current_ep.id}
+    for ep in all_episodes:
+        if ep.id not in presented_or_resolved:
+            logger.debug(
+                "select_next_episode: fallback — selected unrelated unresolved episode %s",
+                ep.id,
+            )
+            return ep
+
+    # Priority 5: session complete
+    logger.debug("select_next_episode: all episodes resolved — session complete")
+    return None
+
+
+async def get_next_episode(
+    state: "TutorState",
+    all_episodes: list[HistoricalEpisode],
+) -> "HistoricalEpisode | None":
+    """
+    Convenience wrapper: calls cognee.recall() on Track B first,
+    then selects the next episode. This is the function callers should
+    use after on_user_answer completes.
+
+    Requirements: 5.7, 5.8
+    """
+    return await select_next_episode(state, all_episodes)
+
+
+# ---------------------------------------------------------------------------
+# on_user_answer  (Socratic branching logic)
+# ---------------------------------------------------------------------------
+
+async def on_user_answer(
+    state: "TutorState",
+    answer: str,
+    episode: HistoricalEpisode,
+) -> AsyncGenerator[str, None]:
+    """
+    Main Socratic branching function.
+
+    1. Classifies the learner's answer.
+    2. Branches on the classification:
+       - matched-failure / matched-success: acknowledge the historical parallel.
+         matched-success also resets nudge_count to 0.
+         matched-failure keeps / may increment nudge_count (treated as a nudge).
+       - partial: targeted Socratic follow-up; increment nudge_count.
+       - novel: acknowledge + evaluate + redirect; increment nudge_count.
+    3. Records the answer in state["answer_history"].
+    4. If nudge_count >= 2 after branching: deliver stuck_fallback and reset.
+    5. Yields response tokens via SSE (AsyncGenerator[str, None]).
+
+    Requirements: 5.2, 5.3, 5.4, 5.5, 5.6
+    """
+    # --- 1. Classify ---
+    label: ClassificationLabel = await classify_answer(answer, episode)
+    logger.debug("on_user_answer: classification=%r", label)
+
+    # --- 2. Record answer in history ---
+    state["answer_history"].append(
+        {
+            "episode_id": episode.id,
+            "answer": answer,
+            "classification": label,
+        }
+    )
+
+    # --- 3. Branch on classification ---
+    if label in ("matched-failure", "matched-success"):
+        # Acknowledge the historical parallel (Requirement 5.3)
+        branch_prompt = _build_acknowledge_parallel_prompt(label, episode, answer)
+        if label == "matched-success":
+            # Success: learner figured it out — reset nudge counter
+            state["nudge_count"] = 0
+        else:
+            # Failure match: treat as a productive nudge
+            state["nudge_count"] = state.get("nudge_count", 0) + 1
+
+    elif label == "partial":
+        # Targeted follow-up (Requirement 5.4)
+        branch_prompt = _build_targeted_followup_prompt(episode, answer)
+        state["nudge_count"] = state.get("nudge_count", 0) + 1
+
+    else:  # novel
+        # Acknowledge + evaluate + redirect (Requirement 5.5)
+        branch_prompt = _build_novel_redirect_prompt(episode, answer)
+        state["nudge_count"] = state.get("nudge_count", 0) + 1
+
+    # --- 4. Check stuck threshold BEFORE streaming branch response ---
+    if state["nudge_count"] >= 2:
+        # Deliver stuck fallback (Requirement 5.6) — four-section structured response
+        logger.debug(
+            "on_user_answer: nudge_count=%d >= 2, delivering stuck_fallback",
+            state["nudge_count"],
+        )
+        state["nudge_count"] = 0  # reset after fallback
+        async for token in stuck_fallback(episode):
+            yield token
+        return  # fallback consumed; branch response is superseded
+
+    # --- 5. Stream the branch response ---
+    try:
+        response = await litellm.acompletion(
+            model=_LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a Socratic tutor. Be concise, warm, and encouraging. "
+                        "Never reveal the full solution directly."
+                    ),
+                },
+                {"role": "user", "content": branch_prompt},
+            ],
+            stream=True,
+            temperature=0.5,
+            max_tokens=300,
+        )
+        async for chunk in response:
+            token: str = chunk.choices[0].delta.content or ""
+            if token:
+                yield token
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("on_user_answer: LLM streaming failed (%s); yielding minimal response", exc)
+        if label == "matched-success":
+            yield f"Well done! You've arrived at the historical solution for '{episode.concept}'."
+        elif label == "matched-failure":
+            yield (
+                f"Interesting — that's exactly the approach that was tried historically "
+                f"for '{episode.concept}', and it led to a failure. Think about why."
+            )
+        elif label == "partial":
+            yield f"You're on the right track for '{episode.concept}'. Can you elaborate further?"
+        else:
+            yield (
+                f"That's a novel approach! Historically, '{episode.concept}' was tackled "
+                "differently. What do you think the original researchers tried?"
+            )

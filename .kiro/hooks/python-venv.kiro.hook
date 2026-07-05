@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "enabled": true,
+  "name": "python venv",
+  "when": {
+    "type": "preTaskExecution"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "source /home/meeth/projects/first-principle/backend/.env/activate\n"
+  },
+  "workspaceFolderName": "first-principle",
+  "shortName": "python-venv"
+}
