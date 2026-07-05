@@ -1,0 +1,25 @@
+{
+  "framework": "vite",
+  "root": "frontend",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm ci",
+  "rewrites": [
+    {
+      "source": "/chat/:path*",
+      "destination": "https://YOUR_RENDER_BACKEND_URL/chat/:path*"
+    },
+    {
+      "source": "/ingest/:path*",
+      "destination": "https://YOUR_RENDER_BACKEND_URL/ingest/:path*"
+    },
+    {
+      "source": "/session/:path*",
+      "destination": "https://YOUR_RENDER_BACKEND_URL/session/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://YOUR_RENDER_BACKEND_URL/health"
+    }
+  ]
+}

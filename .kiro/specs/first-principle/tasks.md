@@ -268,23 +268,23 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
   - Ensure all tests pass, ask the user if questions arise.
 
 
-- [ ] 14. React+TypeScript frontend — core structure
-  - [ ] 14.1 Create TypeScript types and API client in `frontend/src/types/api.ts` and `frontend/src/api/client.ts`
+- [x] 14. React+TypeScript frontend — core structure
+  - [x] 14.1 Create TypeScript types and API client in `frontend/src/types/api.ts` and `frontend/src/api/client.ts`
     - Define `ChatMessage` interface matching the backend SSE contract
     - Write `fetch` wrappers for `POST /chat` and `POST /ingest`
     - _Requirements: 12.1_
 
-  - [ ] 14.2 Implement `useSSEChat` hook in `frontend/src/hooks/`
+  - [x] 14.2 Implement `useSSEChat` hook in `frontend/src/hooks/`
     - `useSSEChat`: stream tokens from `POST /chat` by reading the response body with `TextDecoder`; parse `data:` lines
     - _Requirements: 12.2_
 
-  - [ ] 14.3 Implement full-width chat layout in `frontend/src/App.tsx`
+  - [x] 14.3 Implement full-width chat layout in `frontend/src/App.tsx`
     - Render `ChatPanel` as the sole full-width component
     - _Requirements: 12.1_
 
 
-- [ ] 15. React+TypeScript frontend — ChatPanel
-  - [ ] 15.1 Implement `ChatPanel`, `MessageList`, and `ModeToggle` components
+- [x] 15. React+TypeScript frontend — ChatPanel
+  - [x] 15.1 Implement `ChatPanel`, `MessageList`, and `ModeToggle` components
     - `ChatPanel` consumes `useSSEChat`; renders tokens as they arrive
     - `ModeToggle` switches between `teacher` and `interviewer` mode; on switch emits mode-switch event to backend session lifecycle endpoint
     - `MessageList` renders each message with an episode-match tag where `episode_id` is present in the SSE payload
@@ -295,7 +295,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 12.3_
 
 
-- [ ] 17. Checkpoint — frontend complete
+- [x] 17. Checkpoint — frontend complete
   - Ensure all tests pass, ask the user if questions arise.
 
 

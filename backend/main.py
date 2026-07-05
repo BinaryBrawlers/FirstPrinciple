@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 import config  # noqa: F401
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from memory.seed import seed_tracks_if_absent
 from routers.chat import router as chat_router
@@ -78,6 +79,19 @@ app = FastAPI(
     ),
     version="0.1.0",
     lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# CORS — allow Vite dev server origin in development
+# ---------------------------------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

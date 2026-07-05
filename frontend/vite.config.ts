@@ -8,6 +8,12 @@ export default defineConfig({
     proxy: {
       '/chat': 'http://localhost:8000',
       '/ingest': 'http://localhost:8000',
+      '/session': 'http://localhost:8000',
     },
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: [],
   },
 })
