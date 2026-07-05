@@ -107,23 +107,24 @@ async def discover_curriculum(topic: str) -> tuple[list[str], dict[str, list[str
 
 
 # ---------------------------------------------------------------------------
-# Wikipedia fetch
+# Raw text collectors (no LLM — just gather source material)
 # ---------------------------------------------------------------------------
 
-async def fetch_wikipedia(subtopic: str) -> list[HistoricalEpisode]:
+async def fetch_wikipedia(subtopic: str) -> list[tuple[str, str]]:
+    """Return up to 5 (url, text) pairs from Wikipedia for a concept."""
     import wikipediaapi
 
-    def _get_pages(title: str):
+    def _get_pages(title: str) -> list[tuple[str, str]]:
         wiki = wikipediaapi.Wikipedia(user_agent="FirstPrinciple/1.0", language="en")
         page = wiki.page(title)
         if not page.exists():
             return []
-        # collect up to 5 pages: the main page + related linked pages
-        candidates = [(page.fullurl, page.summary or page.text or "")]
-        for linked_title in list(page.links.keys())[:30]:
+        candidates = [(page.fullurl, (page.summary or page.text or "")[:2000])]
+        for linked_title in list(page.links.keys())[:40]:
             linked = wiki.page(linked_title)
-            if linked.exists() and (linked.summary or linked.text):
-                candidates.append((linked.fullurl, linked.summary or linked.text or ""))
+            text = linked.summary or linked.text or ""
+            if linked.exists() and text:
+                candidates.append((linked.fullurl, text[:2000]))
             if len(candidates) >= 5:
                 break
         return candidates
@@ -135,27 +136,11 @@ async def fetch_wikipedia(subtopic: str) -> list[HistoricalEpisode]:
 
     if not pages:
         logger.info("Wikipedia page not found for: %r", subtopic)
-        return []
-
-    all_episodes: list[HistoricalEpisode] = []
-    for url, text in pages:
-        text = text[:3000]
-        if not text:
-            continue
-        try:
-            eps = await _extract_episodes_from_text(subtopic, text, url)
-            all_episodes.extend(eps)
-        except Exception as exc:
-            logger.warning("Wikipedia extraction failed for %r: %s", url, exc)
-
-    return all_episodes
+    return pages
 
 
-# ---------------------------------------------------------------------------
-# arXiv fetch
-# ---------------------------------------------------------------------------
-
-async def fetch_arxiv(subtopic: str) -> list[HistoricalEpisode]:
+async def fetch_arxiv(subtopic: str) -> list[tuple[str, str]]:
+    """Return up to 5 (title, abstract) pairs from arXiv for a concept."""
     import arxiv
 
     def _search(query: str) -> list:
@@ -168,51 +153,58 @@ async def fetch_arxiv(subtopic: str) -> list[HistoricalEpisode]:
     except Exception as exc:
         raise TransientFetchError(f"arXiv fetch failed for '{subtopic}': {exc}") from exc
 
-    if not results:
-        return []
-
-    all_episodes: list[HistoricalEpisode] = []
-    for result in results[:5]:
-        abstract = (result.summary or "").strip()[:3000]
-        if not abstract:
-            continue
-
-        source_label = result.title or result.entry_id
-        try:
-            episodes = await _extract_episodes_from_text(subtopic, abstract, source_label)
-            for ep in episodes:
-                ep.source_confidence = SourceConfidence.CITED_SOURCE
-                ep.source = source_label
-            all_episodes.extend(episodes)
-        except Exception as exc:
-            logger.warning("arXiv extraction failed for %r: %s", result.title, exc)
-
-    return all_episodes
+    papers = []
+    for r in results[:5]:
+        abstract = (r.summary or "").strip()[:2000]
+        if abstract:
+            papers.append((r.title or r.entry_id, abstract))
+    return papers
 
 
 # ---------------------------------------------------------------------------
-# Episode extraction from text
+# Synthesize exactly 2 episodes per concept from all gathered sources
 # ---------------------------------------------------------------------------
 
-async def _extract_episodes_from_text(
-    subtopic: str, text: str, source_url: str
+async def synthesize_concept_episodes(
+    concept: str,
+    wiki_sources: list[tuple[str, str]],
+    arxiv_sources: list[tuple[str, str]],
 ) -> list[HistoricalEpisode]:
+    """
+    Given raw text from up to 5 Wikipedia pages and 5 arXiv papers,
+    make a single LLM call that synthesises exactly 2 rich episodes.
+    """
+    slug = concept.lower().replace(" ", "_")
+
+    # Build a compact evidence block
+    sections: list[str] = []
+    for i, (url, text) in enumerate(wiki_sources, 1):
+        sections.append(f"[Wikipedia {i}] {url}\n{text}")
+    for i, (title, abstract) in enumerate(arxiv_sources, 1):
+        sections.append(f"[arXiv {i}] {title}\n{abstract}")
+
+    evidence = "\n\n".join(sections)
+
     system_prompt = (
-        "You are a historical episode extractor. "
-        "Given a text excerpt about a technical or scientific topic, "
-        "extract 1-3 key problem-solving episodes IN CHRONOLOGICAL ORDER.\n\n"
-        "Respond with ONLY a JSON array (no markdown, no extra text) where each element has:\n"
-        '  "concept": str  — specific concept name (e.g. "Backpropagation", "Attention Mechanism")\n'
-        '  "problem_posed": str  — the core research problem or open question addressed\n'
-        '  "attempted_solution": str  — the approach, method, or technique proposed\n'
+        "You are a scientific knowledge synthesiser. "
+        "Given multiple source excerpts about a concept, produce EXACTLY 2 problem-solving episodes "
+        "that capture the most important intellectual milestones, in chronological order.\n\n"
+        "Respond with ONLY a JSON array of exactly 2 objects (no markdown). Each object:\n"
+        '  "concept": str  — specific name of the concept or milestone\n'
+        '  "problem_posed": str  — the core research problem addressed (1-2 sentences)\n'
+        '  "attempted_solution": str  — the method or approach proposed (1-2 sentences)\n'
         '  "outcome": "success" | "failure" | "partial"\n'
-        '  "why": str  — why it succeeded/failed/was partial; limitations or impact\n'
+        '  "why": str  — impact, limitations, or reason for outcome (1-2 sentences)\n'
         '  "published_date": "YYYY-MM-DD" or null\n'
         '  "requires": []\n'
         '  "concurrent_with": []\n'
-        "\nBe specific and factual. Each field should be 1-2 sentences max."
+        "\nDraw on ALL provided sources. Be specific and factual."
     )
-    user_prompt = f"Topic: {subtopic}\n\nExcerpt:\n{text}\n\nExtract episodes as JSON array:"
+    user_prompt = (
+        f"Concept: {concept}\n\n"
+        f"Sources:\n{evidence}\n\n"
+        "Synthesise exactly 2 episodes as a JSON array:"
+    )
 
     try:
         response = await litellm.acompletion(
@@ -223,50 +215,57 @@ async def _extract_episodes_from_text(
             ],
             temperature=0.2,
         )
-        content: str = response.choices[0].message.content or ""
-        content = content.strip()
+        content: str = (response.choices[0].message.content or "").strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
             content = content.strip()
 
-        raw_episodes = json.loads(content)
-        if not isinstance(raw_episodes, list):
-            raise ValueError("Expected a JSON array")
+        raw = json.loads(content)
+        if not isinstance(raw, list):
+            raise ValueError("Expected JSON array")
 
-        slug = subtopic.lower().replace(" ", "_")
+        # Enforce exactly 2
+        raw = raw[:2]
+
         episodes: list[HistoricalEpisode] = []
-        for i, ep in enumerate(raw_episodes):
+        # pick best source label for attribution
+        best_source = arxiv_sources[0][0] if arxiv_sources else (wiki_sources[0][0] if wiki_sources else concept)
+        confidence = SourceConfidence.CITED_SOURCE if arxiv_sources else SourceConfidence.NAMED_REFERENCE
+
+        for i, ep in enumerate(raw):
             episodes.append(
                 HistoricalEpisode(
                     id=f"{slug}_{i}",
-                    concept=ep.get("concept", subtopic),
+                    concept=ep.get("concept", concept),
                     problem_posed=ep.get("problem_posed", ""),
                     attempted_solution=ep.get("attempted_solution", ""),
                     outcome=_parse_outcome(ep.get("outcome", "partial")),
                     why=ep.get("why", ""),
-                    requires=[],  # wired later from graph edges
+                    requires=[],
                     concurrent_with=[],
-                    source_confidence=SourceConfidence.NAMED_REFERENCE,
-                    source=source_url,
+                    source_confidence=confidence,
+                    source=best_source,
                     published_date=_parse_date(ep.get("published_date")),
                 )
             )
         return episodes
 
     except Exception as exc:
-        logger.warning("LLM extraction failed for %r: %s", subtopic, exc)
+        logger.warning("Synthesis failed for %r: %s", concept, exc)
+        # Fallback: one bare-bones episode
+        fallback_text = (arxiv_sources[0][1] if arxiv_sources else (wiki_sources[0][1] if wiki_sources else ""))[:400]
         return [
             HistoricalEpisode(
-                id=f"{subtopic.lower().replace(' ', '_')}_0",
-                concept=subtopic,
-                problem_posed=f"Understanding {subtopic}",
-                attempted_solution=text[:400],
+                id=f"{slug}_0",
+                concept=concept,
+                problem_posed=f"Understanding {concept}",
+                attempted_solution=fallback_text,
                 outcome=Outcome.PARTIAL,
-                why="Extracted from source; LLM structuring unavailable.",
+                why="LLM synthesis unavailable.",
                 source_confidence=SourceConfidence.NAMED_REFERENCE,
-                source=source_url,
+                source=concept,
             )
         ]
 
@@ -394,13 +393,13 @@ class IngestionAgent:
         async def fetch_concept(concept: str) -> list[HistoricalEpisode]:
             wiki_task = fetch_wikipedia(concept)
             arxiv_task = fetch_arxiv(concept)
-            wiki_eps, arxiv_eps = await asyncio.gather(wiki_task, arxiv_task, return_exceptions=True)
-            eps = []
-            if isinstance(wiki_eps, list):
-                eps.extend(wiki_eps)
-            if isinstance(arxiv_eps, list):
-                eps.extend(arxiv_eps)
-            logger.info("  %s → %d episodes", concept, len(eps))
+            wiki_sources, arxiv_sources = await asyncio.gather(wiki_task, arxiv_task, return_exceptions=True)
+            if not isinstance(wiki_sources, list):
+                wiki_sources = []
+            if not isinstance(arxiv_sources, list):
+                arxiv_sources = []
+            eps = await synthesize_concept_episodes(concept, wiki_sources, arxiv_sources)
+            logger.info("  %s → %d episodes (wiki=%d, arxiv=%d)", concept, len(eps), len(wiki_sources), len(arxiv_sources))
             return eps
 
         # Fetch all concepts concurrently (but throttle to avoid overwhelming APIs)
