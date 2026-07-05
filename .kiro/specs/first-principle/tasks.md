@@ -38,7 +38,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Implement `add_data_points`, `remember`, `forget`, `improve` with role checks; raise `MemoryAccessError` on violations
     - _Requirements: 14.1, 14.2, 14.3, 14.4_
 
-  - [ ]* 3.2 Write property test for Track A write isolation
+  - [x] 3.2 Write property test for Track A write isolation
     - **Property 4: Track A write isolation**
     - For each role in `{TEACHER, INTERVIEWER, TRAIT_SYNTHESIS}`, construct a `MemoryGateway` and call `add_data_points()`; assert `MemoryAccessError` is raised every time
     - **Validates: Requirements 14.1, 14.4**
@@ -48,7 +48,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - For each role in `{TEACHER, INTERVIEWER}`, call `remember/forget/improve` on a `user_*` graph name; assert `MemoryAccessError` is always raised
     - **Validates: Requirements 14.2, 14.3, 3.3, 3.4**
 
-  - [ ]* 3.4 Write property test for Track B graph naming invariant
+  - [x] 3.4 Write property test for Track B graph naming invariant
     - **Property 6: Track B graph naming invariant**
     - Generate arbitrary user ID strings; assert the graph name produced equals `"user_" + user_id` exactly
     - **Validates: Requirements 3.1**
