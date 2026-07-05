@@ -55,12 +55,12 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 
 
 - [ ] 4. Hand-authored seed episodes
-  - [ ] 4.1 Write OS Memory Management seed episodes in `backend/memory/seed.py`
+  - [x] 4.1 Write OS Memory Management seed episodes in `backend/memory/seed.py`
     - Author six `HistoricalEpisode` dicts in order: base+limit registers → segmentation → external fragmentation (failure) → paging → page tables → MMU/TLB
     - Populate `requires`, `concurrent_with`, `source_confidence`, and `published_date` for each
     - _Requirements: 10.1_
 
-  - [ ] 4.2 Write Deep Learning seed episodes in `backend/memory/seed.py`
+  - [x] 4.2 Write Deep Learning seed episodes in `backend/memory/seed.py`
     - Author nine `HistoricalEpisode` dicts in order: perceptron → XOR failure → MLP → backpropagation → CNN (concurrent: RNN) → vanishing gradient (failure) → LSTM → attention mechanism → Transformer
     - Mark CNN and RNN as `concurrent_with` each other; mark XOR failure and vanishing gradient with `outcome: failure`
     - _Requirements: 10.2_
