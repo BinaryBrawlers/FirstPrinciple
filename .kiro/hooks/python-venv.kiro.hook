@@ -7,7 +7,7 @@
   },
   "then": {
     "type": "runCommand",
-    "command": "source /home/meeth/projects/first-principle/backend/.env/activate\n"
+    "command": "source /home/meeth/projects/first-principle/backend/.env/bin/activate\n"
   },
   "workspaceFolderName": "first-principle",
   "shortName": "python-venv"

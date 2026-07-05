@@ -123,7 +123,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
   - Ensure all tests pass, ask the user if questions arise.
 
 
-- [ ] 7. Teacher Agent
+- [x] 7. Teacher Agent
 
 
   - [x] 7.1 Implement answer classifier in `backend/agents/teacher.py`
@@ -162,7 +162,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Generate random episode DAGs; assert `select_next_episode` order is consistent with a topological sort over `requires` only; adding/removing `concurrent_with` edges SHALL NOT change traversal order
     - **Validates: Requirements 1.2, 1.3**
 
-  - [ ] 7.8 Implement Digest Mode and `@cognee.agent_memory` decorator, SSE streaming
+  - [x] 7.8 Implement Digest Mode and `@cognee.agent_memory` decorator, SSE streaming
     - Write `on_digest(state, transcript)` summarising against Track A without advancing episode position
     - Apply `@cognee.agent_memory(save_traces=True, with_session_memory=True)` to `teacher_agent`
     - Implement `async for token in teacher_agent(...)` SSE streaming via `AsyncGenerator`
@@ -175,14 +175,6 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 
 
 - [ ] 8. Interviewer Agent
-  - [ ] 8.0 Write `scripts/test_interviewer.py` smoke-test script
-    - Accept `--user-id` CLI arg
-    - Load seed episodes from `seed.py`; use failure-outcome episodes as question source
-    - Print the first question to stdout
-    - Enter an interactive loop: read answer from stdin, call `grade_answer()`, prompt for confidence score (1–5), call `compute_penalty()`, print grade + penalty + feedback
-    - After each question log: question concept, user answer, grade, confidence, penalty applied
-    - At end of session call `compute_misconception_diff()` with an empty trait snapshot and print the diff
-    - _Requirements: 7.1–7.9_
 
   - [ ] 8.1 Implement session start: Track B recall with `feedback_influence` and question selection in `backend/agents/interviewer.py`
     - Call `cognee.recall(graph_name=f"user_{user_id}_traits", query_params={"feedback_influence": True})`

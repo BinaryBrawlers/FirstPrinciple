@@ -574,6 +574,281 @@ async def get_next_episode(
 
 
 # ---------------------------------------------------------------------------
+# on_digest  (Digest Mode — Requirements 6.1, 6.2)
+# ---------------------------------------------------------------------------
+
+_DIGEST_SYSTEM_PROMPT = (
+    "You are a learning assistant summarising a video transcript against a "
+    "curated knowledge base. Be concise and informative. "
+    "Do NOT pose questions. Do NOT suggest what the learner should study next."
+)
+
+
+def _build_digest_user_prompt(transcript: str, episode_concepts: str) -> str:
+    return (
+        "You are a learning assistant summarising a video transcript against a "
+        "curated knowledge base.\n\n"
+        f"Track A episodes found (concepts):\n{episode_concepts}\n\n"
+        f"Transcript to summarise:\n{transcript[:3000]}"
+        "  (truncated for context window)\n\n"
+        "Summarise the key concepts from the transcript that align with the "
+        "Track A knowledge base.\n"
+        "For each aligned concept, note:\n"
+        "1. Which episode concept it maps to\n"
+        "2. What the transcript adds or confirms\n"
+        "3. Any gaps (concepts in Track A not covered by the transcript)\n\n"
+        "Do NOT pose questions. Do NOT suggest what the learner should study next.\n"
+        "Keep the summary to 3-5 key points."
+    )
+
+
+async def on_digest(
+    state: "TutorState",
+    transcript: str,
+) -> AsyncGenerator[str, None]:
+    """
+    Summarise a video transcript against Track A (content_track) without
+    advancing the episode position.
+
+    - Calls cognee.recall(graph_name="content_track", ...) to retrieve
+      related Track A episodes.
+    - Uses litellm streaming to summarise the transcript's key points against
+      those episodes.
+    - Does NOT update state["current_episode"]; episode position remains
+      unchanged.
+    - Does NOT pose any Socratic questions.
+
+    Requirements: 6.1, 6.2
+    """
+    # --- 1. Build a query from the transcript (first 200 chars is enough) ---
+    recall_query = transcript[:200].strip() or "knowledge concepts"
+
+    # --- 2. Recall related Track A episodes ---
+    episode_concepts = ""
+    try:
+        results = await cognee.recall(
+            graph_name="content_track",
+            query=recall_query,
+        )
+        if results:
+            # Extract concept strings from whatever cognee.recall() returns
+            concepts: list[str] = []
+            if isinstance(results, (list, tuple)):
+                for item in results:
+                    concept = getattr(item, "concept", None)
+                    if isinstance(concept, str) and concept.strip():
+                        concepts.append(concept.strip())
+                    elif isinstance(item, str) and item.strip():
+                        concepts.append(item.strip())
+            elif isinstance(results, str) and results.strip():
+                concepts.append(results.strip())
+
+            if concepts:
+                episode_concepts = "\n".join(f"- {c}" for c in concepts)
+
+        if not episode_concepts:
+            episode_concepts = "(No matching Track A episodes found — summarising against general knowledge)"
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "on_digest: cognee.recall() failed (%s); proceeding without Track A context", exc
+        )
+        episode_concepts = "(Track A recall unavailable — summarising transcript directly)"
+
+    # --- 3. Stream the summary via litellm ---
+    user_prompt = _build_digest_user_prompt(transcript, episode_concepts)
+
+    try:
+        response = await litellm.acompletion(
+            model=_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": _DIGEST_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+            temperature=0.4,
+            max_tokens=800,
+        )
+        async for chunk in response:
+            token: str = chunk.choices[0].delta.content or ""
+            if token:
+                yield token
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("on_digest: LLM streaming failed (%s); yielding minimal summary", exc)
+        yield (
+            "Digest mode summary unavailable (LLM error). "
+            f"Transcript received ({len(transcript)} chars). "
+            f"Related Track A concepts: {episode_concepts}"
+        )
+
+    # NOTE: state["current_episode"] is deliberately NOT modified here.
+    # Requirements 6.1, 6.2: digest mode does not advance episode position.
+
+
+# ---------------------------------------------------------------------------
+# Defensive @cognee.agent_memory decorator
+# ---------------------------------------------------------------------------
+
+def _get_agent_memory_decorator() -> object:
+    """
+    Return cognee.agent_memory(save_traces=True, with_session_memory=True) if
+    the current cognee installation supports it; otherwise return a no-op
+    passthrough decorator so the module imports cleanly in all environments.
+    """
+    try:
+        decorator_factory = cognee.agent_memory
+        # The installed cognee version uses `save_session_traces` (not `save_traces`)
+        return decorator_factory(save_session_traces=True, with_session_memory=True)
+    except AttributeError:
+        logger.debug(
+            "cognee.agent_memory is not available in this cognee version; "
+            "using no-op fallback decorator for teacher_agent."
+        )
+
+        def _noop_decorator(fn):
+            return fn
+
+        return _noop_decorator
+
+
+_agent_memory_decorator = _get_agent_memory_decorator()
+
+
+# ---------------------------------------------------------------------------
+# teacher_agent  (top-level SSE-streaming entry point — Requirements 5.10, 5.11, 6.1, 6.2)
+# ---------------------------------------------------------------------------
+
+async def _teacher_agent_impl(
+    state: "TutorState",
+    user_input: str,
+) -> AsyncGenerator[str, None]:
+    """
+    Internal async-generator implementation of the Teacher Agent.
+
+    Branches on state["mode"]:
+      - "digest"  → delegates to on_digest(state, user_input), yields all tokens.
+                    Episode position is NOT advanced.
+      - "teacher" → retrieves the current episode from Track A via cognee.recall()
+                    and delegates to on_user_answer(state, user_input, episode).
+                    If no episode is found, yields a graceful error message.
+
+    Not decorated directly — the public ``teacher_agent`` wrapper carries the
+    ``@cognee.agent_memory`` decorator, which requires a plain async function
+    (not an async generator).
+
+    Requirements: 5.10, 5.11, 6.1, 6.2
+    """
+    mode: str = state.get("mode", "teacher")
+
+    if mode == "digest":
+        # Digest mode: summarise transcript without advancing episode position
+        async for token in on_digest(state, user_input):
+            yield token
+        return
+
+    # --- Teacher (Socratic) mode ---
+    # Retrieve the current episode from Track A via cognee.recall()
+    current_ep_id: str = state.get("current_episode", "")
+    episode: "HistoricalEpisode | None" = None
+
+    try:
+        results = await cognee.recall(
+            graph_name="content_track",
+            query=current_ep_id,
+        )
+        if results:
+            # Accept the first result that looks like a HistoricalEpisode
+            if isinstance(results, (list, tuple)):
+                for item in results:
+                    if isinstance(item, HistoricalEpisode):
+                        episode = item
+                        break
+                    # cognee may return generic objects with episode-like attrs
+                    if (
+                        hasattr(item, "id")
+                        and hasattr(item, "concept")
+                        and hasattr(item, "problem_posed")
+                        and hasattr(item, "attempted_solution")
+                        and hasattr(item, "outcome")
+                        and hasattr(item, "why")
+                    ):
+                        # Attempt to reconstruct a HistoricalEpisode from attrs
+                        try:
+                            episode = HistoricalEpisode(
+                                id=item.id,
+                                concept=item.concept,
+                                problem_posed=item.problem_posed,
+                                attempted_solution=item.attempted_solution,
+                                outcome=item.outcome,
+                                why=item.why,
+                                requires=getattr(item, "requires", []),
+                                concurrent_with=getattr(item, "concurrent_with", []),
+                                source_confidence=getattr(
+                                    item, "source_confidence", None
+                                ) or __import__("models.schemas", fromlist=["SourceConfidence"]).SourceConfidence.REASONED,
+                                source=getattr(item, "source", None),
+                                published_date=getattr(item, "published_date", None),
+                            )
+                            break
+                        except Exception:  # noqa: BLE001
+                            continue
+            elif isinstance(results, HistoricalEpisode):
+                episode = results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "teacher_agent: cognee.recall() for episode %r failed (%s); "
+            "episode will be None",
+            current_ep_id,
+            exc,
+        )
+
+    if episode is None:
+        logger.warning(
+            "teacher_agent: no episode found for current_episode=%r; "
+            "yielding graceful message",
+            current_ep_id,
+        )
+        yield (
+            "I wasn't able to retrieve your current episode from the knowledge base. "
+            "Please check that the topic has been ingested and try again, or ask your "
+            "instructor to reload the episode content."
+        )
+        return
+
+    # Delegate to the Socratic branching logic
+    async for token in on_user_answer(state, user_input, episode):
+        yield token
+
+
+# ---------------------------------------------------------------------------
+# teacher_agent  (public entry point — plain async fn so @agent_memory works)
+# ---------------------------------------------------------------------------
+
+@_agent_memory_decorator
+async def teacher_agent(
+    state: "TutorState",
+    user_input: str,
+) -> AsyncGenerator[str, None]:
+    """
+    Public SSE-streaming entry point for the Teacher Agent.
+
+    ``cognee.agent_memory`` requires a plain ``async def`` (not an async
+    generator), so this thin wrapper delegates to ``_teacher_agent_impl``
+    and returns the generator.  Callers iterate it token-by-token:
+
+        async for token in teacher_agent(state, user_input):
+            yield token
+
+    Decorated with @cognee.agent_memory(save_session_traces=True,
+    with_session_memory=True) so all interactions are traceable by the
+    Trait Synthesis Agent.
+
+    Requirements: 5.10, 5.11, 6.1, 6.2
+    """
+    return _teacher_agent_impl(state, user_input)
+
+
+# ---------------------------------------------------------------------------
 # on_user_answer  (Socratic branching logic)
 # ---------------------------------------------------------------------------
 
