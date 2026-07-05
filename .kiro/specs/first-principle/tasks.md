@@ -174,14 +174,14 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - **Validates: Requirements 6.1, 6.2**
 
 
-- [ ] 8. Interviewer Agent
+- [x] 8. Interviewer Agent
 
-  - [ ] 8.1 Implement session start: Track B recall with `feedback_influence` and question selection in `backend/agents/interviewer.py`
+  - [x] 8.1 Implement session start: Track B recall with `feedback_influence` and question selection in `backend/agents/interviewer.py`
     - Call `cognee.recall(graph_name=f"user_{user_id}_traits", query_params={"feedback_influence": True})`
     - Write `select_questions(weak_points, track_a_failure_episodes)` producing single-concept questions drawn preferentially from `outcome: failure` episodes
     - _Requirements: 7.1, 7.2, 7.3_
 
-  - [ ] 8.2 Implement inline grading, confidence prompt, and confidently-wrong penalty
+  - [x] 8.2 Implement inline grading, confidence prompt, and confidently-wrong penalty
     - Write `grade_answer(question, answer)` and `request_confidence_score()` within the same turn
     - Write `compute_penalty(grade, confidence_score)` applying `HARSH_MULTIPLIER` when `confidence ∈ {4,5}` and grade is wrong
     - _Requirements: 7.4, 7.5, 7.6_
@@ -191,13 +191,13 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - For any wrong answer, assert `penalty(wrong, confidence=4) > penalty(wrong, confidence=1)` and `penalty(wrong, confidence=5) > penalty(wrong, confidence=2)`
     - **Validates: Requirements 7.6**
 
-  - [ ] 8.4 Implement session-end misconception diff, `@cognee.agent_memory` decorator, and SSE streaming
+  - [x] 8.4 Implement session-end misconception diff, `@cognee.agent_memory` decorator, and SSE streaming
     - Write `compute_misconception_diff(trait_snapshot, current_track_b)` and stream the diff summary at session end
     - Apply `@cognee.agent_memory(save_traces=True, with_session_memory=True)` to `interviewer_agent`
     - Implement SSE token streaming via `AsyncGenerator`
     - _Requirements: 7.7, 7.8, 7.9_
 
-- [ ] 9. Checkpoint — agent layer
+- [x] 9. Checkpoint — agent layer
   - Ensure all tests pass, ask the user if questions arise.
 
 
