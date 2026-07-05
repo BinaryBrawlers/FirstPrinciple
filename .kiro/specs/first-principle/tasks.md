@@ -16,18 +16,18 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 13.1, 13.2_
 
 - [ ] 2. Data models and schema
-  - [ ] 2.1 Implement `HistoricalEpisode`, `TutorState`, and `TraitStatement` in `backend/models/schemas.py`
+  - [x] 2.1 Implement `HistoricalEpisode`, `TutorState`, and `TraitStatement` in `backend/models/schemas.py`
     - Write `Outcome`, `SourceConfidence` enums and `HistoricalEpisode` dataclass with all required fields
     - Write `TutorState` TypedDict with all nine fields
     - Write `TraitStatement` dataclass
     - _Requirements: 1.1, 3.1_
 
-  - [ ]* 2.2 Write property test for HistoricalEpisode schema completeness
+  - [x] 2.2 Write property test for HistoricalEpisode schema completeness
     - **Property 1: HistoricalEpisode schema completeness**
     - Generate random `HistoricalEpisode` instances via Hypothesis; assert all required fields are present and each value matches its declared type or enum
     - **Validates: Requirements 1.1**
 
-  - [ ]* 2.3 Write unit tests for TutorState defaults and field types
+  - [ ] 2.3 Write unit tests for TutorState defaults and field types
     - Verify each field accepts its specified type; verify `nudge_count` initialises to 0
     - _Requirements: 1.1_
 
