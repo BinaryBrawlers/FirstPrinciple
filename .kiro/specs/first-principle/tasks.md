@@ -119,12 +119,14 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Stub `self_check_recall` to always return False; assert at least one `reasoned`-tier episode exists in Track A after the agent completes
     - **Validates: Requirements 4.6, 4.7**
 
-- [ ] 6. Checkpoint — ingestion layer
+- [x] 6. Checkpoint — ingestion layer
   - Ensure all tests pass, ask the user if questions arise.
 
 
 - [ ] 7. Teacher Agent
-  - [ ] 7.1 Implement answer classifier in `backend/agents/teacher.py`
+
+
+  - [x] 7.1 Implement answer classifier in `backend/agents/teacher.py`
     - Write `classify_answer(answer, episode)` returning exactly one of `{matched-failure, matched-success, partial, novel}`
     - _Requirements: 5.2_
 
@@ -173,6 +175,15 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 
 
 - [ ] 8. Interviewer Agent
+  - [ ] 8.0 Write `scripts/test_interviewer.py` smoke-test script
+    - Accept `--user-id` CLI arg
+    - Load seed episodes from `seed.py`; use failure-outcome episodes as question source
+    - Print the first question to stdout
+    - Enter an interactive loop: read answer from stdin, call `grade_answer()`, prompt for confidence score (1–5), call `compute_penalty()`, print grade + penalty + feedback
+    - After each question log: question concept, user answer, grade, confidence, penalty applied
+    - At end of session call `compute_misconception_diff()` with an empty trait snapshot and print the diff
+    - _Requirements: 7.1–7.9_
+
   - [ ] 8.1 Implement session start: Track B recall with `feedback_influence` and question selection in `backend/agents/interviewer.py`
     - Call `cognee.recall(graph_name=f"user_{user_id}_traits", query_params={"feedback_influence": True})`
     - Write `select_questions(weak_points, track_a_failure_episodes)` producing single-concept questions drawn preferentially from `outcome: failure` episodes
