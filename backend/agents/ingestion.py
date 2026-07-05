@@ -149,11 +149,12 @@ async def fetch_wikipedia(subtopic: str) -> list[HistoricalEpisode]:
 async def _extract_episodes_from_text(
     subtopic: str, text: str, source_url: str
 ) -> list[HistoricalEpisode]:
-    """Ask the LLM to extract structured episode data from Wikipedia text."""
+    """Ask the LLM to extract structured episode data from source text."""
     system_prompt = (
         "You are a historical episode extractor. "
-        "Given a Wikipedia excerpt about a technical or scientific topic, "
-        "extract the key problem-solving episodes from the history of that topic. "
+        "Given a text excerpt about a technical or scientific topic, "
+        "extract the key problem-solving episodes from the history of that topic "
+        "IN CHRONOLOGICAL ORDER.\n\n"
         "Respond with ONLY a JSON array (no markdown, no extra text) where each element has:\n"
         '  "concept": str — the core concept or idea\n'
         '  "problem_posed": str — the original problem that was being solved\n'
@@ -161,11 +162,21 @@ async def _extract_episodes_from_text(
         '  "outcome": "success" | "failure" | "partial"\n'
         '  "why": str — why the outcome occurred (causal explanation)\n'
         '  "published_date": "YYYY-MM-DD" or null\n'
-        "Return 1–3 episodes maximum. Keep each field concise (1–2 sentences)."
+        '  "requires": list[str] — concept names (not IDs) of episodes that MUST be understood '
+        "before this one; use exact concept strings from other episodes in this array. "
+        "Empty list [] if this is a foundational episode.\n"
+        '  "concurrent_with": list[str] — concept names of episodes that happened in parallel '
+        "with no prerequisite relationship. Empty list [] if none.\n\n"
+        "Rules for requires/concurrent_with:\n"
+        "- Only reference concept names of OTHER episodes in your response array\n"
+        "- 'requires' means 'cannot understand this without first understanding X'\n"
+        "- 'concurrent_with' means 'happened at roughly the same time, neither depends on the other'\n"
+        "- Failure episodes often require the episode of the approach that failed\n\n"
+        "Return 1–5 episodes maximum. Keep each field concise (1–2 sentences)."
     )
     user_prompt = (
-        f"Topic: {subtopic}\n\nWikipedia excerpt:\n{text}\n\n"
-        "Extract historical episodes as a JSON array."
+        f"Topic: {subtopic}\n\nExcerpt:\n{text}\n\n"
+        "Extract historical episodes as a JSON array, in chronological order."
     )
 
     try:
@@ -189,17 +200,35 @@ async def _extract_episodes_from_text(
         if not isinstance(raw_episodes, list):
             raise ValueError("Expected a JSON array")
 
-        episodes: list[HistoricalEpisode] = []
+        # Build a concept→id map so requires/concurrent_with concept names
+        # can be resolved to episode IDs within this batch
         slug = subtopic.lower().replace(" ", "_")
+        concept_to_id: dict[str, str] = {}
         for i, ep in enumerate(raw_episodes):
+            ep_id = f"wiki_{slug}_{i}"
+            concept_to_id[ep.get("concept", subtopic)] = ep_id
+
+        def _resolve_refs(refs: list) -> list[str]:
+            """Convert concept-name references to episode IDs where known."""
+            resolved = []
+            for ref in refs:
+                if isinstance(ref, str):
+                    resolved.append(concept_to_id.get(ref, ref))
+            return resolved
+
+        episodes: list[HistoricalEpisode] = []
+        for i, ep in enumerate(raw_episodes):
+            ep_id = f"wiki_{slug}_{i}"
             episodes.append(
                 HistoricalEpisode(
-                    id=f"wiki_{slug}_{i}",
+                    id=ep_id,
                     concept=ep.get("concept", subtopic),
                     problem_posed=ep.get("problem_posed", ""),
                     attempted_solution=ep.get("attempted_solution", ""),
                     outcome=_parse_outcome(ep.get("outcome", "partial")),
                     why=ep.get("why", ""),
+                    requires=_resolve_refs(ep.get("requires", [])),
+                    concurrent_with=_resolve_refs(ep.get("concurrent_with", [])),
                     source_confidence=SourceConfidence.NAMED_REFERENCE,
                     source=source_url,
                     published_date=_parse_date(ep.get("published_date")),
@@ -673,7 +702,7 @@ class IngestionAgent:
             system_prompt = (
                 "You are a first-principles reasoning assistant. "
                 "Given a technical or scientific subtopic, reason from first principles "
-                "to construct plausible historical problem-solving episodes. "
+                "to construct plausible historical problem-solving episodes IN CHRONOLOGICAL ORDER.\n\n"
                 "Respond with ONLY a JSON array (no markdown, no extra text) of 1–3 objects, "
                 "each with these fields:\n"
                 '  "concept": str\n'
@@ -682,11 +711,16 @@ class IngestionAgent:
                 '  "outcome": "success" | "failure" | "partial"\n'
                 '  "why": str\n'
                 '  "published_date": "YYYY-MM-DD" or null\n'
+                '  "requires": list[str] — concept names of episodes in this array that must '
+                "come before this one. Empty list [] if foundational.\n"
+                '  "concurrent_with": list[str] — concept names of episodes that happened in '
+                "parallel with no prerequisite relationship. Empty list [] if none.\n\n"
                 "These are reasoned reconstructions, not sourced facts."
             )
             user_prompt = (
                 f"Subtopic: {subtopic}\n\n"
-                "Generate 1–3 first-principles problem-solving episodes as a JSON array."
+                "Generate 1–3 first-principles problem-solving episodes as a JSON array, "
+                "in chronological order."
             )
 
             try:
@@ -711,14 +745,26 @@ class IngestionAgent:
                     raise ValueError("Expected a JSON array")
 
                 slug = subtopic.lower().replace(" ", "_")
+                # Build concept→id map for cross-reference resolution
+                concept_to_id_fb: dict[str, str] = {}
                 for i, ep in enumerate(raw_episodes):
+                    ep_id = f"reasoned_{slug}_{uuid.uuid4().hex[:8]}_{i}"
+                    concept_to_id_fb[ep.get("concept", subtopic)] = ep_id
+
+                def _resolve_fb(refs: list) -> list[str]:
+                    return [concept_to_id_fb.get(r, r) for r in refs if isinstance(r, str)]
+
+                for i, ep in enumerate(raw_episodes):
+                    ep_id = list(concept_to_id_fb.values())[i]
                     episode = HistoricalEpisode(
-                        id=f"reasoned_{slug}_{uuid.uuid4().hex[:8]}_{i}",
+                        id=ep_id,
                         concept=ep.get("concept", subtopic),
                         problem_posed=ep.get("problem_posed", ""),
                         attempted_solution=ep.get("attempted_solution", ""),
                         outcome=_parse_outcome(ep.get("outcome", "partial")),
                         why=ep.get("why", ""),
+                        requires=_resolve_fb(ep.get("requires", [])),
+                        concurrent_with=_resolve_fb(ep.get("concurrent_with", [])),
                         source_confidence=SourceConfidence.REASONED,
                         source=None,
                         published_date=_parse_date(ep.get("published_date")),
