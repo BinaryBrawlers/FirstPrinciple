@@ -18,7 +18,7 @@ import pytest
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
-from backend.models.schemas import HistoricalEpisode, Outcome, SourceConfidence
+from models.schemas import HistoricalEpisode, Outcome, SourceConfidence
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ Validates: Requirements 1.1
 import pytest
 from typing import get_type_hints, get_args, get_origin, Literal
 
-from backend.models.schemas import TutorState
+from models.schemas import TutorState
 
 
 # ---------------------------------------------------------------------------

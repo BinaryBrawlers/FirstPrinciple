@@ -23,7 +23,7 @@ import pytest
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
-from backend.memory.gateway import AgentRole, MemoryAccessError, MemoryGateway
+from memory.gateway import AgentRole, MemoryAccessError, MemoryGateway
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def test_track_a_write_isolation(role: AgentRole):
     gateway = MemoryGateway(role)
     sample_data_points = [{"id": "ep-001", "concept": "paging"}]
 
-    with patch("backend.memory.gateway.cognee", cognee_mock):
+    with patch("memory.gateway.cognee", cognee_mock):
         with pytest.raises(MemoryAccessError) as exc_info:
             asyncio.run(gateway.add_data_points(sample_data_points))
 
@@ -85,8 +85,8 @@ def test_track_a_write_isolation(role: AgentRole):
         error_text = str(exc_info.value).lower()
         assert role.value in error_text or str(role).lower() in error_text
 
-        # cognee.add_data_points must NOT have been called
-        cognee_mock.add_data_points.assert_not_called()
+        # cognee.remember must NOT have been called (permission denied before reaching cognee)
+        cognee_mock.remember.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def test_track_a_write_isolation(role: AgentRole):
 
 def test_ingestion_role_is_the_only_track_a_writer():
     """INGESTION is the sole permitted Track A writer; all other roles are blocked."""
-    from backend.memory.gateway import _TRACK_A_WRITERS
+    from memory.gateway import _TRACK_A_WRITERS
     assert _TRACK_A_WRITERS == {AgentRole.INGESTION}
 
 
@@ -106,10 +106,10 @@ def test_each_non_ingestion_role_raises_memory_access_error(role: AgentRole):
     gateway = MemoryGateway(role)
     sample_data_points = [{"id": "ep-x", "concept": "test"}]
 
-    with patch("backend.memory.gateway.cognee", cognee_mock):
+    with patch("memory.gateway.cognee", cognee_mock):
         with pytest.raises(MemoryAccessError):
             asyncio.run(gateway.add_data_points(sample_data_points))
-        cognee_mock.add_data_points.assert_not_called()
+        cognee_mock.remember.assert_not_called()
 
 
 def test_error_message_identifies_role():
@@ -117,7 +117,7 @@ def test_error_message_identifies_role():
     cognee_mock = _make_cognee_mock()
     gateway = MemoryGateway(AgentRole.TEACHER)
 
-    with patch("backend.memory.gateway.cognee", cognee_mock):
+    with patch("memory.gateway.cognee", cognee_mock):
         with pytest.raises(MemoryAccessError) as exc_info:
             asyncio.run(gateway.add_data_points([]))
     assert "teacher" in str(exc_info.value).lower()
@@ -129,11 +129,13 @@ def test_ingestion_role_does_not_raise():
     gateway = MemoryGateway(AgentRole.INGESTION)
     sample_data_points = [{"id": "ep-001", "concept": "paging"}]
 
-    with patch("backend.memory.gateway.cognee", cognee_mock):
+    with patch("memory.gateway.cognee", cognee_mock):
         # Should complete without raising
         asyncio.run(gateway.add_data_points(sample_data_points))
-        cognee_mock.add_data_points.assert_called_once_with(
-            sample_data_points, temporal_cognify=True
+        # The gateway now calls cognee.remember() (add + cognify) instead of
+        # the old cognee.add_data_points() which doesn't exist in this version.
+        cognee_mock.remember.assert_called_once_with(
+            sample_data_points, dataset_name="content_track"
         )
 
 

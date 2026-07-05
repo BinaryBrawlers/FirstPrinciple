@@ -54,7 +54,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - **Validates: Requirements 3.1**
 
 
-- [ ] 4. Hand-authored seed episodes
+- [x] 4. Hand-authored seed episodes
   - [x] 4.1 Write OS Memory Management seed episodes in `backend/memory/seed.py`
     - Author six `HistoricalEpisode` dicts in order: base+limit registers → segmentation → external fragmentation (failure) → paging → page tables → MMU/TLB
     - Populate `requires`, `concurrent_with`, `source_confidence`, and `published_date` for each
@@ -81,7 +81,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 
 
 - [ ] 5. Ingestion Agent
-  - [ ] 5.1 Implement topic decomposition and Wikipedia skeleton pass in `backend/agents/ingestion.py`
+  - [x] 5.1 Implement topic decomposition and Wikipedia skeleton pass in `backend/agents/ingestion.py`
     - Write `decompose_topic(topic)` returning `list[str]` subtopics
     - Write `fetch_wikipedia(subtopic)` returning `list[HistoricalEpisode]` with `source_confidence=named_reference`
     - _Requirements: 4.1, 4.2_
