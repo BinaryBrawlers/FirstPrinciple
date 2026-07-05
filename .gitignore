@@ -74,3 +74,6 @@ docs/_build/
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+.cognee_system
+.data_storage

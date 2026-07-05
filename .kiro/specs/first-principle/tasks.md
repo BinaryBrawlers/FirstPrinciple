@@ -32,7 +32,7 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - _Requirements: 1.1_
 
 
-- [] 3. Memory isolation layer (`MemoryGateway`)
+- [x] 3. Memory isolation layer (`MemoryGateway`)
   - [x] 3.1 Implement `AgentRole` enum and `MemoryGateway` class in `backend/memory/gateway.py`
     - Define `_TRACK_A_WRITERS` and `_TRACK_B_WRITERS` sets
     - Implement `add_data_points`, `remember`, `forget`, `improve` with role checks; raise `MemoryAccessError` on violations
