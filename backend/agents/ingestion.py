@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import uuid
+from collections import defaultdict, deque
 from datetime import date
-from typing import Optional
+from typing import Callable, Optional
 
 # --- config MUST come before cognee ---
 import config  # noqa: F401
@@ -228,6 +229,272 @@ async def _extract_episodes_from_text(
 
 
 # ---------------------------------------------------------------------------
+# fetch_arxiv
+# ---------------------------------------------------------------------------
+
+
+async def fetch_arxiv(subtopic: str) -> list[HistoricalEpisode]:
+    """
+    Search arXiv for papers related to *subtopic*, extract HistoricalEpisode
+    objects from each paper's abstract, and tag them with
+    ``source_confidence=SourceConfidence.CITED_SOURCE``.
+
+    Only the abstract (``result.summary``) is used — no full-paper PDF parsing.
+    Returns an empty list if no papers are found or all extractions fail.
+    Raises :exc:`TransientFetchError` on network-level failures.
+    """
+    import arxiv  # imported here to avoid module-level side-effects
+
+    def _search(query: str) -> list:
+        client = arxiv.Client()
+        search = arxiv.Search(query=query, max_results=5)
+        return list(client.results(search))
+
+    try:
+        results = await asyncio.to_thread(_search, subtopic)
+    except Exception as exc:
+        raise TransientFetchError(f"arXiv fetch failed for '{subtopic}': {exc}") from exc
+
+    if not results:
+        logger.info("arXiv: no results found for subtopic: %r", subtopic)
+        return []
+
+    all_episodes: list[HistoricalEpisode] = []
+    for result in results:
+        abstract = (result.summary or "").strip()
+        if not abstract:
+            logger.info("arXiv: skipping paper with empty abstract: %r", result.title)
+            continue
+
+        # Use abstract as the text for episode extraction
+        text = abstract[:4000]
+        source_label = result.title or result.entry_id
+
+        try:
+            episodes = await _extract_episodes_from_text(subtopic, text, source_label)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("arXiv: episode extraction failed for %r: %s", result.title, exc)
+            continue
+
+        # Override source_confidence to CITED_SOURCE and set source to paper title/ID
+        for ep in episodes:
+            ep.source_confidence = SourceConfidence.CITED_SOURCE
+            ep.source = source_label
+
+        all_episodes.extend(episodes)
+        logger.info(
+            "arXiv: extracted %d episode(s) from paper %r", len(episodes), result.title
+        )
+
+    return all_episodes
+
+
+# ---------------------------------------------------------------------------
+# fetch_youtube
+# ---------------------------------------------------------------------------
+
+
+async def fetch_youtube(video_ids: list[str]) -> list[HistoricalEpisode]:
+    """
+    Fetch YouTube transcripts for *video_ids*, extract HistoricalEpisode objects
+    from each transcript, and tag them with
+    ``source_confidence=SourceConfidence.NAMED_REFERENCE``.
+
+    Videos with unavailable transcripts are skipped with a warning.
+    Raises :exc:`TransientFetchError` on network-level failures.
+    Returns an empty list if all transcripts are unavailable or extraction fails.
+    """
+    from youtube_transcript_api import (  # imported here to avoid module-level side-effects
+        YouTubeTranscriptApi,
+        NoTranscriptFound,
+        TranscriptsDisabled,
+        VideoUnavailable,
+    )
+
+    all_episodes: list[HistoricalEpisode] = []
+
+    for video_id in video_ids:
+        # Fetch transcript in a thread to avoid blocking the event loop
+        def _get_transcript(vid: str):
+            return YouTubeTranscriptApi.get_transcript(vid)
+
+        try:
+            transcript_data = await asyncio.to_thread(_get_transcript, video_id)
+        except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as exc:
+            logger.warning(
+                "fetch_youtube: transcript unavailable for video %r: %s", video_id, exc
+            )
+            continue
+        except Exception as exc:
+            raise TransientFetchError(
+                f"YouTube transcript fetch failed for video '{video_id}': {exc}"
+            ) from exc
+
+        # Join transcript segments into a single string
+        text = " ".join(segment.get("text", "") for segment in transcript_data).strip()
+        if not text:
+            logger.info("fetch_youtube: empty transcript for video %r, skipping", video_id)
+            continue
+
+        source_label = f"https://www.youtube.com/watch?v={video_id}"
+
+        # Truncate to keep LLM context manageable
+        text = text[:4000]
+
+        try:
+            episodes = await _extract_episodes_from_text(video_id, text, source_label)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "fetch_youtube: episode extraction failed for video %r: %s", video_id, exc
+            )
+            continue
+
+        # Override source_confidence to NAMED_REFERENCE and set source to YouTube URL
+        for ep in episodes:
+            ep.source_confidence = SourceConfidence.NAMED_REFERENCE
+            ep.source = source_label
+
+        all_episodes.extend(episodes)
+        logger.info(
+            "fetch_youtube: extracted %d episode(s) from video %r", len(episodes), video_id
+        )
+
+    return all_episodes
+
+
+# ---------------------------------------------------------------------------
+# tag_source_confidence
+# ---------------------------------------------------------------------------
+
+
+def tag_source_confidence(
+    episodes: list[HistoricalEpisode],
+) -> list[HistoricalEpisode]:
+    """
+    Apply three-tier source-confidence tagging rules to *episodes* in-place
+    and return the same list.
+
+    Rules (applied in priority order):
+    1. ``cited_source``    — source contains "arxiv" (case-insensitive)
+    2. ``named_reference`` — source contains "wikipedia" or "youtube"
+    3. ``reasoned``        — source is None/empty, or none of the above match
+                             and current tag is already REASONED; otherwise
+                             the fetcher-assigned tag is preserved.
+    """
+    for ep in episodes:
+        src = (ep.source or "").lower()
+        if "arxiv" in src:
+            ep.source_confidence = SourceConfidence.CITED_SOURCE
+        elif "wikipedia" in src or "youtube" in src:
+            ep.source_confidence = SourceConfidence.NAMED_REFERENCE
+        elif not src:
+            # No source at all → reasoned
+            ep.source_confidence = SourceConfidence.REASONED
+        # else: non-empty source that doesn't match any known pattern →
+        #       leave whatever the fetcher already set (may be REASONED, etc.)
+    return episodes
+
+
+# ---------------------------------------------------------------------------
+# narrative_sort
+# ---------------------------------------------------------------------------
+
+
+def narrative_sort(
+    episodes: list[HistoricalEpisode],
+) -> list[HistoricalEpisode]:
+    """
+    Sort *episodes* into narrative order using Kahn's topological sort over
+    ``requires`` edges.  ``published_date`` is used only as a tiebreaker
+    within the same topological level (earlier dates first; ``None`` last).
+
+    Cycles are handled gracefully: any episode involved in a cycle is
+    appended after the acyclic portion, sorted by ``published_date`` only.
+    """
+    ep_by_id: dict[str, HistoricalEpisode] = {ep.id: ep for ep in episodes}
+    ids = list(ep_by_id.keys())
+
+    # Build adjacency list and in-degree map restricted to known IDs
+    in_degree: dict[str, int] = {eid: 0 for eid in ids}
+    dependents: dict[str, list[str]] = defaultdict(list)  # id → list of ids that require it
+
+    for ep in episodes:
+        for req in ep.requires:
+            if req in ep_by_id:
+                in_degree[ep.id] += 1
+                dependents[req].append(ep.id)
+
+    def _date_key(eid: str):
+        d = ep_by_id[eid].published_date
+        # None dates sort last
+        return (1, date.min) if d is None else (0, d)
+
+    # Seed queue with zero-in-degree nodes, ordered by published_date as tiebreaker
+    queue: deque[str] = deque(
+        sorted([eid for eid in ids if in_degree[eid] == 0], key=_date_key)
+    )
+
+    sorted_ids: list[str] = []
+    while queue:
+        # Take the next node; tiebreaking is already baked in via sorted seeding
+        # and re-insertion below.
+        current = queue.popleft()
+        sorted_ids.append(current)
+
+        # Collect newly freed nodes and insert them sorted by date
+        newly_free = []
+        for dep in dependents[current]:
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                newly_free.append(dep)
+
+        if newly_free:
+            # Sort new free nodes by date and merge into the front of the queue
+            newly_free.sort(key=_date_key)
+            # Rebuild queue: prepend newly_free, respecting existing ordering
+            new_queue: deque[str] = deque(newly_free)
+            # Re-sort the combined front for correct tiebreaking
+            combined = sorted(list(new_queue) + list(queue), key=_date_key)
+            queue = deque(combined)
+
+    # Any remaining nodes with in_degree > 0 are part of a cycle
+    cyclic_ids = [eid for eid in ids if eid not in set(sorted_ids)]
+    if cyclic_ids:
+        logger.warning(
+            "narrative_sort: cycle detected among episode IDs %s; "
+            "falling back to date-only sort for these nodes",
+            cyclic_ids,
+        )
+        cyclic_ids.sort(key=_date_key)
+        sorted_ids.extend(cyclic_ids)
+
+    return [ep_by_id[eid] for eid in sorted_ids]
+
+
+# ---------------------------------------------------------------------------
+# fetch_with_retry
+# ---------------------------------------------------------------------------
+
+
+async def fetch_with_retry(fetch_fn: Callable, max_attempts: int = 3):
+    """
+    Call ``await fetch_fn()`` up to *max_attempts* times, retrying only on
+    :exc:`TransientFetchError`.
+
+    Backoff schedule (0-indexed attempt *k*): ``asyncio.sleep(2 ** k)``
+    — i.e., 1 s before attempt 1, 2 s before attempt 2.
+    No third-party retry libraries (tenacity etc.) are used.
+    """
+    for attempt in range(max_attempts):
+        try:
+            return await fetch_fn()
+        except TransientFetchError:
+            if attempt == max_attempts - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+
+# ---------------------------------------------------------------------------
 # IngestionAgent
 # ---------------------------------------------------------------------------
 
@@ -250,11 +517,11 @@ class IngestionAgent:
         video_ids: list[str] | None = None,
     ) -> list[HistoricalEpisode]:
         """
-        Decompose *topic* into subtopics, fetch Wikipedia content for each,
-        and return the collected HistoricalEpisode objects.
+        Decompose *topic* into subtopics, fetch Wikipedia and arXiv content for
+        each subtopic, optionally fetch YouTube transcripts for *video_ids*, and
+        return the collected HistoricalEpisode objects.
 
         cognee writes (Track A) will be added in task 5.5.
-        arXiv and YouTube fetching will be added in task 5.2.
         """
         logger.info("IngestionAgent.run: topic=%r", topic)
         subtopics = await decompose_topic(topic)
@@ -268,6 +535,23 @@ class IngestionAgent:
                 "Wikipedia returned %d episode(s) for subtopic %r",
                 len(wiki_episodes),
                 subtopic,
+            )
+
+            arxiv_episodes = await fetch_arxiv(subtopic)
+            all_episodes.extend(arxiv_episodes)
+            logger.info(
+                "arXiv returned %d episode(s) for subtopic %r",
+                len(arxiv_episodes),
+                subtopic,
+            )
+
+        if video_ids:
+            youtube_episodes = await fetch_youtube(video_ids)
+            all_episodes.extend(youtube_episodes)
+            logger.info(
+                "YouTube returned %d episode(s) for %d video(s)",
+                len(youtube_episodes),
+                len(video_ids),
             )
 
         return all_episodes

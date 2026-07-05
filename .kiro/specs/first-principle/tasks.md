@@ -86,12 +86,12 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Write `fetch_wikipedia(subtopic)` returning `list[HistoricalEpisode]` with `source_confidence=named_reference`
     - _Requirements: 4.1, 4.2_
 
-  - [ ] 5.2 Implement arXiv detail pass and YouTube transcript fetch
+  - [x] 5.2 Implement arXiv detail pass and YouTube transcript fetch
     - Write `fetch_arxiv(subtopic)` restricting to abstract and introduction; tag `source_confidence=cited_source`
     - Write `fetch_youtube(video_ids)` using `youtube-transcript-api`; tag `source_confidence=named_reference`
     - _Requirements: 4.2, 4.3, 4.4_
 
-  - [ ] 5.3 Implement `tag_source_confidence()`, `narrative_sort()`, and retry-with-backoff
+  - [x] 5.3 Implement `tag_source_confidence()`, `narrative_sort()`, and retry-with-backoff
     - Write `tag_source_confidence(episodes)` to apply the three-tier tagging rules
     - Write `narrative_sort(episodes)` respecting `requires` edges; use `published_date` as a tiebreaker only
     - Write `fetch_with_retry(fetch_fn, max_attempts=3)` using `asyncio.sleep(2**attempt)` — no tenacity
