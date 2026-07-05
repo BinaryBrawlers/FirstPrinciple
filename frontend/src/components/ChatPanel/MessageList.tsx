@@ -1,139 +1,153 @@
-/**
- * MessageList — renders the chat conversation.
- *
- * Each assistant message may carry an optional `episode_id` sourced from the
- * SSE metadata. When present, an episode-match tag is rendered alongside the
- * message content (Requirement 12.4).
- *
- * A `streamingContent` prop holds the partial text of the currently arriving
- * assistant reply so that tokens are displayed as they stream in (Requirement 12.2).
- */
+import { useEffect, useRef } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { BookMarked } from "lucide-react";
 import type { ChatMessage } from "../../types/api";
 
 interface MessageListProps {
   messages: ChatMessage[];
-  /** Partial text of the assistant reply currently being streamed. Empty string when idle. */
   streamingContent: string;
 }
 
-/** Inline styles for individual message bubbles. */
-const userBubbleStyle: React.CSSProperties = {
-  alignSelf: "flex-end",
-  backgroundColor: "#2563eb",
-  color: "#fff",
-  borderRadius: "16px 16px 4px 16px",
-  padding: "10px 14px",
-  maxWidth: "75%",
-  wordBreak: "break-word",
-  lineHeight: 1.5,
+const bubbleVariants = {
+  hidden:  { opacity: 0, y: 10 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.22, ease: "easeOut" } },
+  exit:    { opacity: 0, y: -4, transition: { duration: 0.15 } },
 };
 
-const assistantBubbleStyle: React.CSSProperties = {
-  alignSelf: "flex-start",
-  backgroundColor: "#f3f4f6",
-  color: "#111827",
-  borderRadius: "16px 16px 16px 4px",
-  padding: "10px 14px",
-  maxWidth: "75%",
-  wordBreak: "break-word",
-  lineHeight: 1.5,
-};
+function TypingDots() {
+  return (
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "center", padding: "2px 0" }}>
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          animate={{ y: [0, -5, 0], opacity: [0.4, 1, 0.4] }}
+          transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2, ease: "easeInOut" }}
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            backgroundColor: "#58a6ff",
+            display: "inline-block",
+          }}
+        />
+      ))}
+    </span>
+  );
+}
 
-const streamingBubbleStyle: React.CSSProperties = {
-  ...assistantBubbleStyle,
-  borderBottom: "2px solid #2563eb",
-};
-
-const episodeTagStyle: React.CSSProperties = {
-  display: "inline-block",
-  marginTop: 4,
-  fontSize: 11,
-  fontFamily: "monospace",
-  backgroundColor: "#dbeafe",
-  color: "#1d4ed8",
-  borderRadius: 4,
-  padding: "1px 6px",
-};
-
-const roleLabelStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: "#9ca3af",
-  marginBottom: 2,
-  fontFamily: "sans-serif",
-};
-
-/**
- * Renders a single message bubble with an optional episode-match tag.
- * Requirement 12.4 — annotate each message with an episode-match tag
- * indicating which HistoricalEpisode the message corresponds to, where applicable.
- */
 function MessageBubble({
   message,
-  isStreaming,
+  isStreaming = false,
 }: {
   message: ChatMessage;
   isStreaming?: boolean;
 }) {
   const isUser = message.role === "user";
-  const bubbleStyle = isStreaming
-    ? streamingBubbleStyle
-    : isUser
-    ? userBubbleStyle
-    : assistantBubbleStyle;
 
   return (
-    <div
+    <motion.div
+      variants={bubbleVariants}
+      initial="hidden"
+      animate="visible"
       style={{
         display: "flex",
         flexDirection: "column",
         alignItems: isUser ? "flex-end" : "flex-start",
-        marginBottom: 12,
+        marginBottom: 20,
       }}
     >
-      <span style={roleLabelStyle}>{isUser ? "You" : "FirstPrinciple"}</span>
-      <div style={bubbleStyle}>
-        <span style={{ whiteSpace: "pre-wrap" }}>{message.content}</span>
-        {/* Episode-match tag — shown only when episode_id is present (Req 12.4) */}
+      <span
+        style={{
+          fontSize: 10,
+          color: "#484f58",
+          marginBottom: 5,
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        {isUser ? "You" : "FirstPrinciple"}
+      </span>
+
+      <div
+        style={{
+          maxWidth: "72%",
+          borderRadius: isUser ? "18px 18px 5px 18px" : "18px 18px 18px 5px",
+          padding: "11px 16px",
+          backgroundColor: isUser ? "var(--accent-teacher)" : "#161b22",
+          color: isUser ? "#fff" : "#e6edf3",
+          border: isUser
+            ? "none"
+            : `1px solid ${isStreaming ? "var(--accent-teacher)" : "#21262d"}`,
+          boxShadow: isStreaming ? "0 0 0 1px rgba(31,111,235,0.15)" : "none",
+          wordBreak: "break-word",
+          lineHeight: 1.7,
+          fontSize: 14,
+          fontFamily: "'Inter', system-ui, sans-serif",
+          transition: "border-color 0.2s, box-shadow 0.2s",
+        }}
+      >
+        {isStreaming && !message.content
+          ? <TypingDots />
+          : <span style={{ whiteSpace: "pre-wrap", fontFamily: "'Inter', system-ui, sans-serif" }}>{message.content}</span>
+        }
+
         {!isUser && message.episode_id && (
-          <div>
-            <span style={episodeTagStyle} title="Matched HistoricalEpisode">
-              📖 {message.episode_id}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #21262d" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: 11,
+                fontFamily: "monospace",
+                color: "var(--accent-teacher)",
+                opacity: 0.8,
+              }}
+            >
+              <BookMarked size={11} />
+              {message.episode_id}
             </span>
           </div>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
-/**
- * MessageList renders committed messages plus an in-progress streaming bubble.
- *
- * Requirement 12.2 — display streamed responses token-by-token as they arrive.
- * Requirement 12.4 — annotate each message with an episode-match tag where applicable.
- */
 export function MessageList({ messages, streamingContent }: MessageListProps) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streamingContent]);
+
+  if (messages.length === 0 && !streamingContent) return null;
+
   return (
     <div
       style={{
+        flex: 1,
+        overflowY: "auto",
+        padding: "32px 24px 12px",
         display: "flex",
         flexDirection: "column",
-        padding: "16px 16px 0",
-        overflowY: "auto",
-        flex: 1,
       }}
     >
-      {messages.map((msg, idx) => (
-        <MessageBubble key={idx} message={msg} />
-      ))}
+      <AnimatePresence initial={false}>
+        {messages.map((msg, idx) => (
+          <MessageBubble key={idx} message={msg} />
+        ))}
+      </AnimatePresence>
 
-      {/* In-flight streaming bubble — shown while tokens are arriving */}
       {streamingContent && (
         <MessageBubble
           message={{ role: "assistant", content: streamingContent }}
           isStreaming
         />
       )}
+
+      <div ref={bottomRef} />
     </div>
   );
 }

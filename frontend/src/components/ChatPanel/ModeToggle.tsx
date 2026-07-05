@@ -1,80 +1,65 @@
-/**
- * ModeToggle — switches the chat between Teacher mode and Interviewer mode.
- *
- * On click it:
- * 1. Calls the parent's `onModeSwitch` callback with the new mode.
- * 2. The parent (`ChatPanel`) is responsible for emitting the mode-switch
- *    event to the backend and generating a new session_id.
- *
- * Requirement 12.3 — The Chat Panel SHALL provide a mode toggle allowing the
- * user to switch between Teacher mode and Interviewer mode.
- */
+import { BookOpen, Target } from "lucide-react";
+import { motion } from "framer-motion";
+
 interface ModeToggleProps {
   currentMode: "teacher" | "interviewer";
   disabled?: boolean;
   onModeSwitch: (newMode: "teacher" | "interviewer") => void;
 }
 
-const containerStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 4,
-  backgroundColor: "#f3f4f6",
-  borderRadius: 8,
-  padding: 4,
-};
+const MODES = [
+  { id: "teacher",     label: "Teacher",     Icon: BookOpen },
+  { id: "interviewer", label: "Interviewer", Icon: Target   },
+] as const;
 
-function buttonStyle(active: boolean): React.CSSProperties {
-  return {
-    padding: "6px 16px",
-    borderRadius: 6,
-    border: "none",
-    cursor: "pointer",
-    fontFamily: "sans-serif",
-    fontSize: 13,
-    fontWeight: active ? 600 : 400,
-    backgroundColor: active ? "#2563eb" : "transparent",
-    color: active ? "#fff" : "#4b5563",
-    transition: "background-color 0.15s, color 0.15s",
-  };
-}
-
-/**
- * Renders two toggle buttons: Teacher and Interviewer.
- * The active mode is highlighted; switching fires `onModeSwitch` with the new mode.
- *
- * Requirement 12.3
- */
 export function ModeToggle({ currentMode, disabled = false, onModeSwitch }: ModeToggleProps) {
-  const handleTeacher = () => {
-    if (currentMode !== "teacher") {
-      onModeSwitch("teacher");
-    }
-  };
-
-  const handleInterviewer = () => {
-    if (currentMode !== "interviewer") {
-      onModeSwitch("interviewer");
-    }
-  };
-
   return (
-    <div style={containerStyle} role="group" aria-label="Chat mode">
-      <button
-        style={buttonStyle(currentMode === "teacher")}
-        aria-pressed={currentMode === "teacher"}
-        disabled={disabled}
-        onClick={handleTeacher}
-      >
-        🎓 Teacher
-      </button>
-      <button
-        style={buttonStyle(currentMode === "interviewer")}
-        aria-pressed={currentMode === "interviewer"}
-        disabled={disabled}
-        onClick={handleInterviewer}
-      >
-        🔍 Interviewer
-      </button>
+    <div
+      style={{
+        display: "flex",
+        gap: 2,
+        backgroundColor: "#0d1117",
+        borderRadius: 10,
+        padding: 3,
+        border: "1px solid #30363d",
+        position: "relative",
+      }}
+      role="group"
+      aria-label="Chat mode"
+    >
+      {MODES.map(({ id, label, Icon }) => {
+        const active = currentMode === id;
+        const accent = id === "interviewer" ? "var(--accent-interviewer)" : "var(--accent-teacher)";
+        return (
+          <motion.button
+            key={id}
+            onClick={() => !active && !disabled && onModeSwitch(id)}
+            disabled={disabled}
+            aria-pressed={active}
+            whileTap={!disabled && !active ? { scale: 0.95 } : {}}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "5px 14px",
+              borderRadius: 7,
+              border: "none",
+              cursor: disabled ? "not-allowed" : active ? "default" : "pointer",
+              fontSize: 13,
+              fontWeight: active ? 600 : 400,
+              backgroundColor: active ? accent : "transparent",
+              color: active ? "#fff" : "#6e7681",
+              transition: "background-color 0.2s, color 0.2s",
+              opacity: disabled ? 0.5 : 1,
+              letterSpacing: "0.01em",
+              fontFamily: "inherit",
+            }}
+          >
+            <Icon size={14} strokeWidth={active ? 2.5 : 2} />
+            {label}
+          </motion.button>
+        );
+      })}
     </div>
   );
 }

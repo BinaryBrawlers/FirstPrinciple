@@ -45,16 +45,17 @@ class HistoricalEpisode:
 # TutorState — shared LangGraph state TypedDict
 # ---------------------------------------------------------------------------
 
-class TutorState(TypedDict):
-    user_id:         str
-    topic:           str
-    current_episode: str                                    # episode ID
-    mode:            Literal["teacher", "interviewer", "digest"]
-    session_id:      str
-    nudge_count:     int                                    # consecutive stuck nudges
-    answer_history:  list[dict]                             # {episode_id, answer, classification}
-    trait_snapshot:  list[str]                              # Track B trait IDs at session start
-    ingest_needed:   bool
+class TutorState(TypedDict, total=False):
+    user_id:                            str
+    topic:                              str
+    current_episode:                    str                                    # episode ID
+    mode:                               Literal["teacher", "interviewer", "digest"]
+    session_id:                         str
+    nudge_count:                        int                                    # consecutive stuck nudges
+    answer_history:                     list[dict]                             # {episode_id, answer, classification}
+    trait_snapshot:                     list[str]                              # Track B trait IDs at session start
+    ingest_needed:                      bool
+    awaiting_response_to_posed_problem: bool                                   # True only after agent posed a problem
 
 
 # ---------------------------------------------------------------------------

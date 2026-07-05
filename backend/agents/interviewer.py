@@ -840,10 +840,16 @@ async def _interviewer_agent_impl(
         questions = await on_session_start(state, track_a_episodes)
 
         if not questions:
-            yield (
-                "No interview questions could be generated for this session. "
-                "Please ensure the topic has been ingested into Track A."
+            # No episodes from Track A — fall back to generating a question from general knowledge
+            topic_display = topic or "the topic"
+            fallback_intro = (
+                f"Let's put your understanding to the test on {topic_display}.\n\n"
+                "Here's a question to get us started: "
+                "Can you walk me through the core problem that researchers in this field "
+                "were originally trying to solve, and what made it non-trivial?"
             )
+            for word in fallback_intro.split(" "):
+                yield word + " "
             return
 
         # Stream the first question token-by-token

@@ -1,0 +1,29 @@
+:root {
+  --accent-teacher: #1f6feb;
+  --accent-teacher-tint: rgba(31, 111, 235, 0.08);
+  --accent-interviewer: #c0392b;
+  --accent-interviewer-tint: rgba(192, 57, 43, 0.08);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  /* Ensure font-family inherits through all elements including framer-motion wrappers */
+  font-family: inherit;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }

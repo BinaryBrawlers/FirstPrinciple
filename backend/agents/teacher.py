@@ -738,8 +738,120 @@ async def on_digest(
 
 
 # ---------------------------------------------------------------------------
-# Defensive @cognee.agent_memory decorator
+# Direct-question handling (no episode context required)
 # ---------------------------------------------------------------------------
+
+_DIRECT_ANSWER_SYSTEM_PROMPT = """\
+You are FirstPrinciple, a knowledgeable tutor who teaches concepts by \
+tracing their historical development. You answer questions clearly, \
+accurately, and in an engaging way.
+
+IMPORTANT RULES:
+- Never mention retrieval systems, knowledge bases, ingestion, or any \
+internal mechanics to the learner. You are just a tutor — answer from \
+knowledge, like any good teacher would.
+- If you have specific historical sources, cite them naturally. If you \
+don't, keep historical claims general ("researchers in the 1960s found…") \
+rather than inventing specific names, years, or paper titles.
+- Do NOT force a follow-up question onto every answer. Most direct questions \
+deserve a direct, complete answer — full stop. Only add a follow-up if it \
+genuinely enriches the conversation.
+- Be warm, precise, and intellectually curious in tone.\
+"""
+
+
+def _is_direct_question(user_input: str) -> bool:
+    """
+    Heuristic: detect whether the user is asking a direct question or making
+    a general statement, as opposed to responding to a posed problem.
+
+    Returns True if the message looks like a direct question/request,
+    meaning we should answer directly rather than run the Socratic loop.
+    """
+    stripped = user_input.strip().lower()
+
+    # Explicit question words at the start
+    question_starters = (
+        "what ", "why ", "how ", "when ", "where ", "who ", "which ",
+        "can you", "could you", "explain", "tell me", "describe",
+        "what's", "what is", "what are", "how does", "how do",
+        "i don't", "i don't", "i don't get", "i'm confused",
+        "clarify", "help me", "help me understand", "give me",
+        "show me", "walk me through", "can u", "what do you mean",
+        "what does", "please explain",
+    )
+
+    if any(stripped.startswith(s) for s in question_starters):
+        return True
+
+    # Ends with a question mark
+    if stripped.endswith("?"):
+        return True
+
+    # Very short messages (< 6 words) that aren't clearly answers
+    # are likely questions or requests, not problem responses
+    word_count = len(stripped.split())
+    if word_count <= 4 and not any(
+        kw in stripped for kw in ("because", "since", "therefore", "so that", "by using")
+    ):
+        return True
+
+    return False
+
+
+async def _answer_directly(
+    user_input: str,
+    topic: str,
+    episode: "HistoricalEpisode | None",
+) -> AsyncGenerator[str, None]:
+    """
+    Answer a direct question from the user without running the Socratic loop.
+
+    Uses episode context if available for grounding; falls back gracefully
+    to general LLM knowledge if not.
+
+    Never surfaces retrieval errors to the user.
+    """
+    if episode is not None:
+        context = (
+            f"Current learning context — Concept: {episode.concept}\n"
+            f"Problem posed: {episode.problem_posed}\n"
+            f"Historical approach: {episode.attempted_solution}\n"
+            f"Why it matters: {episode.why}\n\n"
+        )
+    else:
+        context = f"The learner is exploring the topic: {topic}\n\n"
+
+    user_prompt = (
+        f"{context}"
+        f"The learner asks: {user_input}\n\n"
+        "Answer this directly and helpfully. Do not force a follow-up question "
+        "onto the end of your response unless it genuinely enriches the answer. "
+        "Most questions deserve a complete, standalone answer."
+    )
+
+    try:
+        response = await litellm.acompletion(
+            model=_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": _DIRECT_ANSWER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+            temperature=0.5,
+            max_tokens=500,
+        )
+        async for chunk in response:
+            token: str = chunk.choices[0].delta.content or ""
+            if token:
+                yield token
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_answer_directly: LLM call failed (%s); yielding fallback", exc)
+        topic_display = episode.concept if episode else topic
+        yield (
+            f"Great question about {topic_display}. "
+            "I'm having a little trouble right now — try asking again in a moment."
+        )
 
 def _get_agent_memory_decorator() -> object:
     """
@@ -857,14 +969,23 @@ async def _teacher_agent_impl(
     if episode is None:
         logger.warning(
             "teacher_agent: no episode found for current_episode=%r; "
-            "yielding graceful message",
+            "answering directly from general knowledge",
             current_ep_id,
         )
-        yield (
-            "I wasn't able to retrieve your current episode from the knowledge base. "
-            "Please check that the topic has been ingested and try again, or ask your "
-            "instructor to reload the episode content."
-        )
+        # Bug 1 fix: never surface a retrieval error — answer from general knowledge instead
+        async for token in _answer_directly(user_input, state.get("topic", ""), None):
+            yield token
+        return
+
+    # Bug 2 fix: only run the Socratic classify-and-branch loop when the
+    # agent itself just posed a problem and is now receiving the learner's
+    # attempt at answering it. For direct questions, just answer directly.
+    awaiting_response = state.get("awaiting_response_to_posed_problem", False)
+
+    if not awaiting_response or _is_direct_question(user_input):
+        # Direct question or general message — answer helpfully, no forced loop
+        async for token in _answer_directly(user_input, state.get("topic", ""), episode):
+            yield token
         return
 
     # Delegate to the Socratic branching logic
@@ -988,21 +1109,25 @@ async def on_user_answer(
         # Acknowledge the historical parallel (Requirement 5.3)
         branch_prompt = _build_acknowledge_parallel_prompt(label, episode, answer)
         if label == "matched-success":
-            # Success: learner figured it out — reset nudge counter
+            # Success: learner figured it out — reset nudge counter AND end the pose loop
             state["nudge_count"] = 0
+            state["awaiting_response_to_posed_problem"] = False
         else:
-            # Failure match: treat as a productive nudge
+            # Failure match: treat as a productive nudge; stay in the pose loop
             state["nudge_count"] = state.get("nudge_count", 0) + 1
+            state["awaiting_response_to_posed_problem"] = True
 
     elif label == "partial":
-        # Targeted follow-up (Requirement 5.4)
+        # Targeted follow-up (Requirement 5.4) — still waiting for a better answer
         branch_prompt = _build_targeted_followup_prompt(episode, answer)
         state["nudge_count"] = state.get("nudge_count", 0) + 1
+        state["awaiting_response_to_posed_problem"] = True
 
     else:  # novel
-        # Acknowledge + evaluate + redirect (Requirement 5.5)
+        # Acknowledge + evaluate + redirect (Requirement 5.5) — redirect to problem
         branch_prompt = _build_novel_redirect_prompt(episode, answer)
         state["nudge_count"] = state.get("nudge_count", 0) + 1
+        state["awaiting_response_to_posed_problem"] = True
 
     # --- 4. Check stuck threshold BEFORE streaming branch response ---
     if state["nudge_count"] >= 2:
@@ -1012,6 +1137,7 @@ async def on_user_answer(
             state["nudge_count"],
         )
         state["nudge_count"] = 0  # reset after fallback
+        state["awaiting_response_to_posed_problem"] = False  # episode loop ends after fallback
         async for token in stuck_fallback(episode):
             yield token
         return  # fallback consumed; branch response is superseded
@@ -1024,8 +1150,16 @@ async def on_user_answer(
                 {
                     "role": "system",
                     "content": (
-                        "You are a Socratic tutor. Be concise, warm, and encouraging. "
-                        "Never reveal the full solution directly."
+                        "You are FirstPrinciple, a Socratic tutor guiding a learner through "
+                        "the historical development of a concept. Be concise, warm, and encouraging.\n\n"
+                        "RULES:\n"
+                        "- You are currently in the Socratic challenge loop — the learner just "
+                        "responded to a problem you posed. Stay in that context.\n"
+                        "- Never reveal the full solution directly.\n"
+                        "- Never mention retrieval systems, knowledge bases, ingestion, or any "
+                        "internal mechanics. You are a tutor — respond from knowledge.\n"
+                        "- Do NOT force a question onto the end of success/acknowledgement "
+                        "responses — let the learner breathe after getting something right."
                     ),
                 },
                 {"role": "user", "content": branch_prompt},

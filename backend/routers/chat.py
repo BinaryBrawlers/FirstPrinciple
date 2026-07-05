@@ -96,6 +96,7 @@ def load_or_create_state(
             "answer_history": [],
             "trait_snapshot": [],
             "ingest_needed": True,   # triggers Chain 1 on first turn
+            "awaiting_response_to_posed_problem": False,
         }
         _session_store[key] = state
     else:
@@ -151,47 +152,51 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
             req.topic,
         )
 
-        # --- Chain 1 dispatch: run ingestion before streaming new topics ---
+        # --- Chain 1 dispatch: kick off ingestion as a background task ---
+        # We do NOT await ingestion inline — it can take 30-120s and would
+        # time out the SSE connection.  Instead we fire-and-forget via
+        # asyncio.create_task so the user gets an immediate response.
         if state.get("ingest_needed"):
+            import asyncio
             logger.info(
-                "chat: ingest_needed=True for topic=%r; invoking Chain 1 "
+                "chat: ingest_needed=True for topic=%r; firing Chain 1 in background "
                 "(user=%r session=%r)",
                 req.topic,
                 req.user_id,
                 req.session_id,
             )
-            try:
-                state = await invoke_chain1(state)
-                # Persist the updated state (ingest_needed is now False)
-                _session_store[(req.user_id, req.session_id)] = state
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "chat: Chain 1 failed for topic=%r (%s); continuing without ingestion",
-                    req.topic,
-                    exc,
-                )
-                # Mark ingest as done anyway to avoid retry loops in the same session
-                state["ingest_needed"] = False
-                _session_store[(req.user_id, req.session_id)] = state
-                yield (
-                    f"event: error\r\ndata: Topic ingestion failed: {exc}. "
-                    f"Proceeding with available knowledge.\r\n\r\n"
-                )
+            state["ingest_needed"] = False
+            _session_store[(req.user_id, req.session_id)] = state
+
+            async def _run_chain1(s: TutorState) -> None:
+                try:
+                    updated = await invoke_chain1(s)
+                    _session_store[(s["user_id"], s["session_id"])] = updated
+                    logger.info("chat: background Chain 1 complete for topic=%r", s["topic"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("chat: background Chain 1 failed for topic=%r (%s)", s["topic"], exc)
+
+            asyncio.create_task(_run_chain1(dict(state)))  # type: ignore[arg-type]
+
+            # Signal the frontend that ingestion started (no user-facing text)
+            yield {"event": "ingesting", "data": req.topic}
 
         # --- Mid-session turn: invoke agent directly ---
+        # Call the internal impl directly, bypassing the @cognee.agent_memory
+        # decorator which requires dataset permissions that may not be set up.
         if req.mode == "teacher":
-            agent_gen = teacher_agent(state, req.message)
+            from agents.teacher import _teacher_agent_impl
+            agent_gen = _teacher_agent_impl(state, req.message)
         else:
-            agent_gen = interviewer_agent(state, req.message)
+            from agents.interviewer import _interviewer_agent_impl
+            agent_gen = _interviewer_agent_impl(state, req.message)
 
         # Iterate the agent's AsyncGenerator and yield each token as an SSE event.
         # Streaming begins immediately — Requirement 11.3.
-        # Yield raw SSE-formatted strings so that both the ASGI layer and tests
-        # that iterate body_iterator directly can read the content.
         try:
             async for token in agent_gen:
                 if token:
-                    yield f"data: {token}\r\n\r\n"
+                    yield {"data": token}
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "chat: agent streaming failed for user=%r session=%r (%s)",
@@ -199,9 +204,17 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
                 req.session_id,
                 exc,
             )
-            yield f"event: error\r\ndata: Streaming error: {exc}\r\n\r\n"
+            yield {"event": "error", "data": f"Streaming error: {exc}"}
 
         # Signal the client that the stream is complete (Requirement 11.3)
-        yield "event: done\r\ndata: \r\n\r\n"
+        yield {"event": "done", "data": ""}
 
-    return EventSourceResponse(token_generator())
+    return EventSourceResponse(
+        token_generator(),
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

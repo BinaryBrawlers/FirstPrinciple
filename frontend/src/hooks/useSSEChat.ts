@@ -119,7 +119,10 @@ export function useSSEChat(): UseSSEChatResult {
             if (line.startsWith("event:")) {
               const eventName = line.slice(6).trim();
               isDoneEvent = eventName === "done";
-              // Stop streaming when a "done" event is signalled.
+              // "ingesting" is a backend signal only — never shown to the user as chat text
+              if (eventName === "ingesting") {
+                // No token added — ingestion state is managed by useIngestion hook
+              }
               if (isDoneEvent) {
                 break outer;
               }
@@ -128,11 +131,14 @@ export function useSSEChat(): UseSSEChatResult {
 
             if (line.startsWith("data:")) {
               if (isDoneEvent) {
-                // A data line accompanying a "done" event — stop here.
                 break outer;
               }
-              const token = line.slice(5).trim();
-              if (token) {
+              // Use slice(5) WITHOUT .trim() — trimming strips the leading space
+              // that separates words when Mistral streams tokens like "data: foo".
+              // Only skip genuinely empty data lines.
+              const token = line.slice(5);
+              // Never emit ingestion sentinel or event data as chat tokens
+              if (token && !token.startsWith("__ingesting__")) {
                 setTokens((prev) => [...prev, token]);
               }
             }
