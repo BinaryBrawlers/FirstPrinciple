@@ -6,8 +6,8 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
 
 ## Tasks
 
-- [ ] 1. Project scaffold and environment configuration
-  - [ ] 1.1 Create directory structure and dependency files
+- [x] 1. Project scaffold and environment configuration
+  - [x] 1.1 Create directory structure and dependency files
     - Create `backend/` and `frontend/` root directories
     - Write `backend/requirements.txt` pinning: `cognee`, `langgraph`, `fastapi`, `uvicorn`, `sse-starlette`, `wikipedia-api`, `arxiv`, `youtube-transcript-api`, `python-dotenv`
     - Write `backend/config.py` that reads `MISTRAL_API_KEY` and sets `COGNEE_SKIP_CONNECTION_TEST=true` via `os.environ` before any cognee import; call `cognee.config.set_llm_provider("mistral")` and `cognee.config.set_embedding_provider("fastembed")`

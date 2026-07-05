@@ -1,0 +1,12 @@
+cognee 
+langgraph
+fastapi
+uvicorn
+sse-starlette
+wikipedia-api
+arxiv
+youtube-transcript-api
+python-dotenv
+hypothesis
+pytest
+pytest-asyncio
