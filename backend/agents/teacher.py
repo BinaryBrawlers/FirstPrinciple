@@ -43,6 +43,58 @@ _VALID_LABELS: frozenset[str] = frozenset(
 _LLM_MODEL = os.environ.get("LLM_MODEL", "mistral/mistral-small-latest")
 
 # ---------------------------------------------------------------------------
+# Helpless answer detection
+# ---------------------------------------------------------------------------
+
+_HELPLESS_PATTERNS: frozenset[str] = frozenset({
+    "i don't know", "i dont know", "idk", "no idea", "no clue",
+    "i don't get it", "i dont get it", "i don't understand",
+    "i dont understand", "not sure", "i'm not sure", "im not sure",
+    "help", "help me", "i'm confused", "im confused", "i'm lost",
+    "im lost", "i have no idea", "what", "what?", "huh", "huh?",
+    "i'm stuck", "im stuck", "i need help", "can you explain",
+    "explain", "explain me", "explain it", "tell me", "tell me the answer",
+    "give me the answer", "i give up", "?", "??", "???",
+    "skip", "pass", "next", "i can't", "i cant",
+})
+
+
+def is_helpless_answer(answer: str) -> bool:
+    """Detect if the learner's answer is a helpless/confused non-attempt."""
+    cleaned = answer.strip().lower().rstrip(".!,")
+    if not cleaned or len(cleaned) < 3:
+        return True
+    if cleaned in _HELPLESS_PATTERNS:
+        return True
+    # Check for very short answers that are just filler
+    words = [w for w in cleaned.split() if len(w) > 2]
+    if len(words) <= 2 and any(p in cleaned for p in (
+        "don't know", "dont know", "no idea", "not sure", "help",
+        "confused", "stuck", "lost", "explain", "don't get", "dont get",
+        "don't understand", "dont understand", "give up",
+    )):
+        return True
+    return False
+
+
+def _build_starter_hint_prompt(episode: HistoricalEpisode) -> str:
+    """Build a prompt that gives the learner a gentle starting point."""
+    return (
+        f"You are a warm, encouraging Socratic tutor. A learner is stuck on the "
+        f"very first step — they haven't even attempted an answer yet.\n\n"
+        f"Episode: {episode.concept}\n"
+        f"Problem posed: {episode.problem_posed}\n\n"
+        f"Do THREE things in order:\n"
+        f"1. Reassure them (1 sentence — it's okay not to know).\n"
+        f"2. Restate the core problem in simpler, everyday language "
+        f"(2-3 sentences — use an analogy if helpful).\n"
+        f"3. Give them a specific starting direction — not the answer, but a "
+        f"concrete first step to think about (1-2 sentences).\n\n"
+        f"Keep the total response under 5 sentences. Be warm, not condescending."
+    )
+
+
+# ---------------------------------------------------------------------------
 # classify_answer
 # ---------------------------------------------------------------------------
 
@@ -873,6 +925,51 @@ async def on_user_answer(
 
     Requirements: 5.2, 5.3, 5.4, 5.5, 5.6
     """
+
+    # --- 0. Helpless detection (before classification) ---
+    if is_helpless_answer(answer):
+        logger.debug("on_user_answer: helpless answer detected — giving starter hint")
+        # Record as helpless but do NOT increment nudge_count
+        state["answer_history"].append(
+            {
+                "episode_id": episode.id,
+                "answer": answer,
+                "classification": "helpless",
+            }
+        )
+        # Stream a starter hint
+        prompt = _build_starter_hint_prompt(episode)
+        try:
+            response = await litellm.acompletion(
+                model=_LLM_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a warm Socratic tutor. The learner hasn't "
+                            "attempted an answer yet. Help them get started."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                stream=True,
+                temperature=0.5,
+                max_tokens=250,
+            )
+            async for chunk in response:
+                token: str = chunk.choices[0].delta.content or ""
+                if token:
+                    yield token
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("on_user_answer: starter hint LLM failed (%s); yielding static hint", exc)
+            yield (
+                f"No worries — this is a tough one! Let me help you get started.\n\n"
+                f"{episode.problem_posed}\n\n"
+                f"Think about it this way: what's the simplest approach you can "
+                f"imagine to solve this problem? Even a guess is a great starting point."
+            )
+        return  # Don't increment nudge_count — this wasn't a real attempt
+
     # --- 1. Classify ---
     label: ClassificationLabel = await classify_answer(answer, episode)
     logger.debug("on_user_answer: classification=%r", label)
