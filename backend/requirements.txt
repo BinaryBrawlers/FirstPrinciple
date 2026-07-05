@@ -11,3 +11,4 @@ hypothesis
 pytest
 pytest-asyncio
 mistral-common[sentencepiece]
+mistralai

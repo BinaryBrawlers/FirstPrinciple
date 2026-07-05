@@ -53,9 +53,10 @@ import config  # noqa: F401 — sets up cognee + LiteLLM env vars
 
 from agents.ingestion import (
     IngestionAgent,
-    decompose_topic,
+    discover_curriculum,
     fetch_wikipedia,
     fetch_arxiv,
+    synthesize_concept_episodes,
     tag_source_confidence,
     narrative_sort,
 )
@@ -101,46 +102,29 @@ async def run(topic: str) -> None:
     # Step 1: Decompose topic
     # ------------------------------------------------------------------
     _header("STEP 1 — Topic decomposition")
-    subtopics = await decompose_topic(topic)
+    subtopics, _prereqs = await discover_curriculum(topic)
     print(f"  Decomposed into {len(subtopics)} subtopic(s):")
     for i, s in enumerate(subtopics, 1):
         print(f"    {i}. {s}")
 
     # ------------------------------------------------------------------
-    # Step 2: Fetch per source (first subtopic only for speed in manual test)
+    # Step 2: Full fetch + synthesis across ALL subtopics
     # ------------------------------------------------------------------
-    _header("STEP 2 — Wikipedia fetch (first subtopic only)")
-    first = subtopics[0]
-    wiki_eps = await fetch_wikipedia(first)
-    print(f"  Got {len(wiki_eps)} episode(s) from Wikipedia for {first!r}")
-    for i, ep in enumerate(wiki_eps):
-        _print_episode(ep, i)
-
-    _header("STEP 3 — arXiv fetch (first subtopic only)")
-    arxiv_eps = await fetch_arxiv(first)
-    print(f"  Got {len(arxiv_eps)} episode(s) from arXiv for {first!r}")
-    for i, ep in enumerate(arxiv_eps):
-        _print_episode(ep, i)
-
-    # ------------------------------------------------------------------
-    # Step 3: Full pipeline via IngestionAgent
-    # (skips cognee write — we just call the fetch+sort parts directly)
-    # ------------------------------------------------------------------
-    _header("STEP 4 — Full fetch across ALL subtopics (no cognee write)")
+    _header("STEP 2 — Full fetch + synthesis across ALL subtopics")
     all_episodes: list[HistoricalEpisode] = []
     for subtopic in subtopics:
         w = await fetch_wikipedia(subtopic)
         a = await fetch_arxiv(subtopic)
-        all_episodes.extend(w)
-        all_episodes.extend(a)
-        print(f"  {subtopic!r}: wiki={len(w)}, arxiv={len(a)}")
+        eps = await synthesize_concept_episodes(subtopic, w, a)
+        all_episodes.extend(eps)
+        print(f"  {subtopic!r}: wiki={len(w)}, arxiv={len(a)} → {len(eps)} episode(s)")
 
     print(f"\n  Total raw episodes: {len(all_episodes)}")
 
     # ------------------------------------------------------------------
-    # Step 4: Tag confidence
+    # Step 3: Tag confidence
     # ------------------------------------------------------------------
-    _header("STEP 5 — Source confidence tagging")
+    _header("STEP 3 — Source confidence tagging")
     tag_source_confidence(all_episodes)
     from collections import Counter
     counts = Counter(ep.source_confidence.value for ep in all_episodes)
@@ -148,9 +132,9 @@ async def run(topic: str) -> None:
         print(f"  {tier}: {n}")
 
     # ------------------------------------------------------------------
-    # Step 5: Narrative sort
+    # Step 4: Narrative sort
     # ------------------------------------------------------------------
-    _header("STEP 6 — Narrative sort (topological + date tiebreak)")
+    _header("STEP 4 — Narrative sort (topological + date tiebreak)")
     sorted_eps = narrative_sort(all_episodes)
     print(f"  Sorted {len(sorted_eps)} episodes. Order:")
     for i, ep in enumerate(sorted_eps):
@@ -159,9 +143,9 @@ async def run(topic: str) -> None:
         print(f"    {i+1:>3}. [{ep.source_confidence.value[:6]}] {ep.concept}{deps}{conc}")
 
     # ------------------------------------------------------------------
-    # Step 6: Full details of sorted episodes
+    # Step 5: Full episode details
     # ------------------------------------------------------------------
-    _header("STEP 7 — Full episode details (sorted order)")
+    _header("STEP 5 — Full episode details (sorted order)")
     for i, ep in enumerate(sorted_eps):
         _print_episode(ep, i + 1)
 
