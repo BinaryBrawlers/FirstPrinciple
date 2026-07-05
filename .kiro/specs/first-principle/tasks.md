@@ -27,13 +27,13 @@ Build the FirstPrinciple multi-agent learning system bottom-up: environment and 
     - Generate random `HistoricalEpisode` instances via Hypothesis; assert all required fields are present and each value matches its declared type or enum
     - **Validates: Requirements 1.1**
 
-  - [ ] 2.3 Write unit tests for TutorState defaults and field types
+  - [x] 2.3 Write unit tests for TutorState defaults and field types
     - Verify each field accepts its specified type; verify `nudge_count` initialises to 0
     - _Requirements: 1.1_
 
 
-- [ ] 3. Memory isolation layer (`MemoryGateway`)
-  - [ ] 3.1 Implement `AgentRole` enum and `MemoryGateway` class in `backend/memory/gateway.py`
+- [] 3. Memory isolation layer (`MemoryGateway`)
+  - [x] 3.1 Implement `AgentRole` enum and `MemoryGateway` class in `backend/memory/gateway.py`
     - Define `_TRACK_A_WRITERS` and `_TRACK_B_WRITERS` sets
     - Implement `add_data_points`, `remember`, `forget`, `improve` with role checks; raise `MemoryAccessError` on violations
     - _Requirements: 14.1, 14.2, 14.3, 14.4_
