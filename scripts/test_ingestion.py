@@ -53,7 +53,7 @@ import config  # noqa: F401 — sets up cognee + LiteLLM env vars
 
 from agents.ingestion import (
     IngestionAgent,
-    decompose_topic,
+    discover_curriculum,
     fetch_wikipedia,
     fetch_arxiv,
     tag_source_confidence,
@@ -101,7 +101,7 @@ async def run(topic: str) -> None:
     # Step 1: Decompose topic
     # ------------------------------------------------------------------
     _header("STEP 1 — Topic decomposition")
-    subtopics = await decompose_topic(topic)
+    subtopics, _prereqs = await discover_curriculum(topic)
     print(f"  Decomposed into {len(subtopics)} subtopic(s):")
     for i, s in enumerate(subtopics, 1):
         print(f"    {i}. {s}")

@@ -1,9 +1,21 @@
 """
-Ingestion Agent — decomposes a topic into subtopics, fetches Wikipedia content,
-and synthesises HistoricalEpisode objects from each subtopic.
+Ingestion Agent — graph-builder-driven discovery pipeline.
 
-IMPORTANT: backend.config must be imported first (before any cognee import)
-to apply the LiteLLM patch and set COGNEE_SKIP_CONNECTION_TEST.
+IMPORTANT: backend.config must be imported first (before any cognee import).
+
+PUBLIC API (preserved):
+- ingestion_agent.run(topic: str, video_ids: list[str] | None = None) -> list[HistoricalEpisode]
+
+Pipeline:
+1. graph_builder.generate_dependency_graph(topic)
+   → OpenAlex paper discovery + recursive reference expansion
+   → LLM builds dependency graph from paper evidence
+   → returns {nodes: [ordered concepts], edges: [[prereq, concept], ...]}
+2. For each concept node (in order): fetch Wikipedia + arXiv in parallel
+3. Extract HistoricalEpisode from each source using LLM
+4. Wire up requires[] using graph edges
+5. narrative_sort to finalize order
+6. Write to memory / return
 """
 from __future__ import annotations
 
@@ -26,18 +38,10 @@ from models.schemas import HistoricalEpisode, Outcome, SourceConfidence
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Custom exceptions
-# ---------------------------------------------------------------------------
-
 
 class TransientFetchError(Exception):
     """Raised when a fetch operation fails transiently and may be retried."""
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 _LLM_MODEL = os.environ.get("LLM_MODEL", "mistral/mistral-small-latest")
 
@@ -62,122 +66,153 @@ def _parse_date(raw: Optional[str]) -> Optional[date]:
 
 
 # ---------------------------------------------------------------------------
-# decompose_topic
+# Graph-based topic discovery (wraps graph_builder.py)
 # ---------------------------------------------------------------------------
 
-
-async def decompose_topic(topic: str) -> list[str]:
+async def discover_curriculum(topic: str) -> tuple[list[str], dict[str, list[str]]]:
     """
-    Use the configured LLM to decompose *topic* into 4-8 constituent subtopics.
+    Use graph_builder to discover the dependency graph via OpenAlex + LLM.
 
-    Falls back to ``[topic]`` if the LLM call or parsing fails.
+    Returns:
+        nodes   — ordered list of concept strings (foundational → advanced)
+        prereqs — dict mapping concept → list of prerequisite concepts
     """
-    system_prompt = (
-        "You are a knowledge decomposition assistant. "
-        "When given a topic, respond with ONLY a JSON array of 4 to 8 strings, "
-        "each string being a distinct constituent subtopic of that topic. "
-        "Do not include any explanation or markdown fences — only the raw JSON array."
-    )
-    user_prompt = f"Decompose the following topic into constituent subtopics:\n\n{topic}"
-
     try:
-        response = await litellm.acompletion(
-            model=_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-        )
-        content: str = response.choices[0].message.content or ""
-        # Strip markdown fences if the LLM adds them despite instructions
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
+        from agents.graph_builder import generate_dependency_graph
+    except ImportError:
+        from backend.agents.graph_builder import generate_dependency_graph
 
-        subtopics = json.loads(content)
-        if isinstance(subtopics, list) and subtopics:
-            return [str(s).strip() for s in subtopics if str(s).strip()]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("decompose_topic failed, using fallback: %s", exc)
+    logger.info("=== GRAPH BUILDER: discovering curriculum for '%s' ===", topic)
 
-    return [topic]
+    # Run the blocking graph_builder pipeline in a thread
+    graph = await asyncio.to_thread(generate_dependency_graph, topic)
+
+    nodes: list[str] = graph["nodes"]
+    edges: list[list[str]] = graph["edges"]
+
+    # Build prereq map: concept → [prerequisites]
+    prereqs: dict[str, list[str]] = {n: [] for n in nodes}
+    for edge in edges:
+        if len(edge) == 2:
+            src, dst = edge[0], edge[1]
+            if dst in prereqs:
+                prereqs[dst].append(src)
+
+    logger.info(
+        "Graph builder returned %d concepts, %d edges: %s",
+        len(nodes), len(edges),
+        nodes
+    )
+    return nodes, prereqs
 
 
 # ---------------------------------------------------------------------------
-# fetch_wikipedia
+# Wikipedia fetch
 # ---------------------------------------------------------------------------
-
 
 async def fetch_wikipedia(subtopic: str) -> list[HistoricalEpisode]:
-    """
-    Fetch Wikipedia content for *subtopic* and synthesise HistoricalEpisode
-    objects using the LLM.
+    import wikipediaapi
 
-    Returns an empty list if the page does not exist.
-    Falls back to a single synthesised episode if LLM extraction fails.
-    """
-    import wikipediaapi  # imported here to avoid module-level side-effects
-
-    def _get_page(title: str):
+    def _get_pages(title: str):
         wiki = wikipediaapi.Wikipedia(user_agent="FirstPrinciple/1.0", language="en")
-        return wiki.page(title)
+        page = wiki.page(title)
+        if not page.exists():
+            return []
+        # collect up to 5 pages: the main page + related linked pages
+        candidates = [(page.fullurl, page.summary or page.text or "")]
+        for linked_title in list(page.links.keys())[:30]:
+            linked = wiki.page(linked_title)
+            if linked.exists() and (linked.summary or linked.text):
+                candidates.append((linked.fullurl, linked.summary or linked.text or ""))
+            if len(candidates) >= 5:
+                break
+        return candidates
 
-    # Run the blocking wikipediaapi call in a thread to avoid blocking the event loop
     try:
-        page = await asyncio.to_thread(_get_page, subtopic)
+        pages = await asyncio.to_thread(_get_pages, subtopic)
     except Exception as exc:
         raise TransientFetchError(f"Wikipedia fetch failed for '{subtopic}': {exc}") from exc
 
-    if not page.exists():
-        logger.info("Wikipedia page not found for subtopic: %r", subtopic)
+    if not pages:
+        logger.info("Wikipedia page not found for: %r", subtopic)
         return []
 
-    # Truncate to keep LLM context manageable
-    text = page.summary[:4000] if page.summary else (page.text[:4000] if page.text else "")
-    if not text:
-        logger.info("Wikipedia page for %r has no content", subtopic)
+    all_episodes: list[HistoricalEpisode] = []
+    for url, text in pages:
+        text = text[:3000]
+        if not text:
+            continue
+        try:
+            eps = await _extract_episodes_from_text(subtopic, text, url)
+            all_episodes.extend(eps)
+        except Exception as exc:
+            logger.warning("Wikipedia extraction failed for %r: %s", url, exc)
+
+    return all_episodes
+
+
+# ---------------------------------------------------------------------------
+# arXiv fetch
+# ---------------------------------------------------------------------------
+
+async def fetch_arxiv(subtopic: str) -> list[HistoricalEpisode]:
+    import arxiv
+
+    def _search(query: str) -> list:
+        client = arxiv.Client()
+        search = arxiv.Search(query=query, max_results=5)
+        return list(client.results(search))
+
+    try:
+        results = await asyncio.to_thread(_search, subtopic)
+    except Exception as exc:
+        raise TransientFetchError(f"arXiv fetch failed for '{subtopic}': {exc}") from exc
+
+    if not results:
         return []
 
-    episodes = await _extract_episodes_from_text(subtopic, text, page.fullurl)
-    return episodes
+    all_episodes: list[HistoricalEpisode] = []
+    for result in results[:5]:
+        abstract = (result.summary or "").strip()[:3000]
+        if not abstract:
+            continue
 
+        source_label = result.title or result.entry_id
+        try:
+            episodes = await _extract_episodes_from_text(subtopic, abstract, source_label)
+            for ep in episodes:
+                ep.source_confidence = SourceConfidence.CITED_SOURCE
+                ep.source = source_label
+            all_episodes.extend(episodes)
+        except Exception as exc:
+            logger.warning("arXiv extraction failed for %r: %s", result.title, exc)
+
+    return all_episodes
+
+
+# ---------------------------------------------------------------------------
+# Episode extraction from text
+# ---------------------------------------------------------------------------
 
 async def _extract_episodes_from_text(
     subtopic: str, text: str, source_url: str
 ) -> list[HistoricalEpisode]:
-    """Ask the LLM to extract structured episode data from source text."""
     system_prompt = (
         "You are a historical episode extractor. "
         "Given a text excerpt about a technical or scientific topic, "
-        "extract the key problem-solving episodes from the history of that topic "
-        "IN CHRONOLOGICAL ORDER.\n\n"
+        "extract 1-3 key problem-solving episodes IN CHRONOLOGICAL ORDER.\n\n"
         "Respond with ONLY a JSON array (no markdown, no extra text) where each element has:\n"
-        '  "concept": str — the core concept or idea\n'
-        '  "problem_posed": str — the original problem that was being solved\n'
-        '  "attempted_solution": str — how researchers/engineers tried to solve it\n'
+        '  "concept": str  — specific concept name (e.g. "Backpropagation", "Attention Mechanism")\n'
+        '  "problem_posed": str  — the core research problem or open question addressed\n'
+        '  "attempted_solution": str  — the approach, method, or technique proposed\n'
         '  "outcome": "success" | "failure" | "partial"\n'
-        '  "why": str — why the outcome occurred (causal explanation)\n'
+        '  "why": str  — why it succeeded/failed/was partial; limitations or impact\n'
         '  "published_date": "YYYY-MM-DD" or null\n'
-        '  "requires": list[str] — concept names (not IDs) of episodes that MUST be understood '
-        "before this one; use exact concept strings from other episodes in this array. "
-        "Empty list [] if this is a foundational episode.\n"
-        '  "concurrent_with": list[str] — concept names of episodes that happened in parallel '
-        "with no prerequisite relationship. Empty list [] if none.\n\n"
-        "Rules for requires/concurrent_with:\n"
-        "- Only reference concept names of OTHER episodes in your response array\n"
-        "- 'requires' means 'cannot understand this without first understanding X'\n"
-        "- 'concurrent_with' means 'happened at roughly the same time, neither depends on the other'\n"
-        "- Failure episodes often require the episode of the approach that failed\n\n"
-        "Return 1–5 episodes maximum. Keep each field concise (1–2 sentences)."
+        '  "requires": []\n'
+        '  "concurrent_with": []\n'
+        "\nBe specific and factual. Each field should be 1-2 sentences max."
     )
-    user_prompt = (
-        f"Topic: {subtopic}\n\nExcerpt:\n{text}\n\n"
-        "Extract historical episodes as a JSON array, in chronological order."
-    )
+    user_prompt = f"Topic: {subtopic}\n\nExcerpt:\n{text}\n\nExtract episodes as JSON array:"
 
     try:
         response = await litellm.acompletion(
@@ -200,35 +235,19 @@ async def _extract_episodes_from_text(
         if not isinstance(raw_episodes, list):
             raise ValueError("Expected a JSON array")
 
-        # Build a concept→id map so requires/concurrent_with concept names
-        # can be resolved to episode IDs within this batch
         slug = subtopic.lower().replace(" ", "_")
-        concept_to_id: dict[str, str] = {}
-        for i, ep in enumerate(raw_episodes):
-            ep_id = f"wiki_{slug}_{i}"
-            concept_to_id[ep.get("concept", subtopic)] = ep_id
-
-        def _resolve_refs(refs: list) -> list[str]:
-            """Convert concept-name references to episode IDs where known."""
-            resolved = []
-            for ref in refs:
-                if isinstance(ref, str):
-                    resolved.append(concept_to_id.get(ref, ref))
-            return resolved
-
         episodes: list[HistoricalEpisode] = []
         for i, ep in enumerate(raw_episodes):
-            ep_id = f"wiki_{slug}_{i}"
             episodes.append(
                 HistoricalEpisode(
-                    id=ep_id,
+                    id=f"{slug}_{i}",
                     concept=ep.get("concept", subtopic),
                     problem_posed=ep.get("problem_posed", ""),
                     attempted_solution=ep.get("attempted_solution", ""),
                     outcome=_parse_outcome(ep.get("outcome", "partial")),
                     why=ep.get("why", ""),
-                    requires=_resolve_refs(ep.get("requires", [])),
-                    concurrent_with=_resolve_refs(ep.get("concurrent_with", [])),
+                    requires=[],  # wired later from graph edges
+                    concurrent_with=[],
                     source_confidence=SourceConfidence.NAMED_REFERENCE,
                     source=source_url,
                     published_date=_parse_date(ep.get("published_date")),
@@ -236,21 +255,16 @@ async def _extract_episodes_from_text(
             )
         return episodes
 
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "LLM episode extraction failed for %r, using text-based fallback: %s",
-            subtopic,
-            exc,
-        )
-        # Graceful fallback: synthesise a single episode from the raw text
+    except Exception as exc:
+        logger.warning("LLM extraction failed for %r: %s", subtopic, exc)
         return [
             HistoricalEpisode(
-                id=f"wiki_{subtopic.lower().replace(' ', '_')}_0",
+                id=f"{subtopic.lower().replace(' ', '_')}_0",
                 concept=subtopic,
-                problem_posed=f"Understanding the fundamentals of {subtopic}",
-                attempted_solution=text[:500],
+                problem_posed=f"Understanding {subtopic}",
+                attempted_solution=text[:400],
                 outcome=Outcome.PARTIAL,
-                why="Extracted from Wikipedia summary; LLM structuring was unavailable.",
+                why="Extracted from source; LLM structuring unavailable.",
                 source_confidence=SourceConfidence.NAMED_REFERENCE,
                 source=source_url,
             )
@@ -258,158 +272,10 @@ async def _extract_episodes_from_text(
 
 
 # ---------------------------------------------------------------------------
-# fetch_arxiv
+# Source confidence tagging
 # ---------------------------------------------------------------------------
 
-
-async def fetch_arxiv(subtopic: str) -> list[HistoricalEpisode]:
-    """
-    Search arXiv for papers related to *subtopic*, extract HistoricalEpisode
-    objects from each paper's abstract, and tag them with
-    ``source_confidence=SourceConfidence.CITED_SOURCE``.
-
-    Only the abstract (``result.summary``) is used — no full-paper PDF parsing.
-    Returns an empty list if no papers are found or all extractions fail.
-    Raises :exc:`TransientFetchError` on network-level failures.
-    """
-    import arxiv  # imported here to avoid module-level side-effects
-
-    def _search(query: str) -> list:
-        client = arxiv.Client()
-        search = arxiv.Search(query=query, max_results=5)
-        return list(client.results(search))
-
-    try:
-        results = await asyncio.to_thread(_search, subtopic)
-    except Exception as exc:
-        raise TransientFetchError(f"arXiv fetch failed for '{subtopic}': {exc}") from exc
-
-    if not results:
-        logger.info("arXiv: no results found for subtopic: %r", subtopic)
-        return []
-
-    all_episodes: list[HistoricalEpisode] = []
-    for result in results:
-        abstract = (result.summary or "").strip()
-        if not abstract:
-            logger.info("arXiv: skipping paper with empty abstract: %r", result.title)
-            continue
-
-        # Use abstract as the text for episode extraction
-        text = abstract[:4000]
-        source_label = result.title or result.entry_id
-
-        try:
-            episodes = await _extract_episodes_from_text(subtopic, text, source_label)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("arXiv: episode extraction failed for %r: %s", result.title, exc)
-            continue
-
-        # Override source_confidence to CITED_SOURCE and set source to paper title/ID
-        for ep in episodes:
-            ep.source_confidence = SourceConfidence.CITED_SOURCE
-            ep.source = source_label
-
-        all_episodes.extend(episodes)
-        logger.info(
-            "arXiv: extracted %d episode(s) from paper %r", len(episodes), result.title
-        )
-
-    return all_episodes
-
-
-# ---------------------------------------------------------------------------
-# fetch_youtube
-# ---------------------------------------------------------------------------
-
-
-async def fetch_youtube(video_ids: list[str]) -> list[HistoricalEpisode]:
-    """
-    Fetch YouTube transcripts for *video_ids*, extract HistoricalEpisode objects
-    from each transcript, and tag them with
-    ``source_confidence=SourceConfidence.NAMED_REFERENCE``.
-
-    Videos with unavailable transcripts are skipped with a warning.
-    Raises :exc:`TransientFetchError` on network-level failures.
-    Returns an empty list if all transcripts are unavailable or extraction fails.
-    """
-    from youtube_transcript_api import (  # imported here to avoid module-level side-effects
-        YouTubeTranscriptApi,
-        NoTranscriptFound,
-        TranscriptsDisabled,
-        VideoUnavailable,
-    )
-
-    all_episodes: list[HistoricalEpisode] = []
-
-    for video_id in video_ids:
-        # Fetch transcript in a thread to avoid blocking the event loop
-        def _get_transcript(vid: str):
-            return YouTubeTranscriptApi.get_transcript(vid)
-
-        try:
-            transcript_data = await asyncio.to_thread(_get_transcript, video_id)
-        except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as exc:
-            logger.warning(
-                "fetch_youtube: transcript unavailable for video %r: %s", video_id, exc
-            )
-            continue
-        except Exception as exc:
-            raise TransientFetchError(
-                f"YouTube transcript fetch failed for video '{video_id}': {exc}"
-            ) from exc
-
-        # Join transcript segments into a single string
-        text = " ".join(segment.get("text", "") for segment in transcript_data).strip()
-        if not text:
-            logger.info("fetch_youtube: empty transcript for video %r, skipping", video_id)
-            continue
-
-        source_label = f"https://www.youtube.com/watch?v={video_id}"
-
-        # Truncate to keep LLM context manageable
-        text = text[:4000]
-
-        try:
-            episodes = await _extract_episodes_from_text(video_id, text, source_label)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "fetch_youtube: episode extraction failed for video %r: %s", video_id, exc
-            )
-            continue
-
-        # Override source_confidence to NAMED_REFERENCE and set source to YouTube URL
-        for ep in episodes:
-            ep.source_confidence = SourceConfidence.NAMED_REFERENCE
-            ep.source = source_label
-
-        all_episodes.extend(episodes)
-        logger.info(
-            "fetch_youtube: extracted %d episode(s) from video %r", len(episodes), video_id
-        )
-
-    return all_episodes
-
-
-# ---------------------------------------------------------------------------
-# tag_source_confidence
-# ---------------------------------------------------------------------------
-
-
-def tag_source_confidence(
-    episodes: list[HistoricalEpisode],
-) -> list[HistoricalEpisode]:
-    """
-    Apply three-tier source-confidence tagging rules to *episodes* in-place
-    and return the same list.
-
-    Rules (applied in priority order):
-    1. ``cited_source``    — source contains "arxiv" (case-insensitive)
-    2. ``named_reference`` — source contains "wikipedia" or "youtube"
-    3. ``reasoned``        — source is None/empty, or none of the above match
-                             and current tag is already REASONED; otherwise
-                             the fetcher-assigned tag is preserved.
-    """
+def tag_source_confidence(episodes: list[HistoricalEpisode]) -> list[HistoricalEpisode]:
     for ep in episodes:
         src = (ep.source or "").lower()
         if "arxiv" in src:
@@ -417,35 +283,20 @@ def tag_source_confidence(
         elif "wikipedia" in src or "youtube" in src:
             ep.source_confidence = SourceConfidence.NAMED_REFERENCE
         elif not src:
-            # No source at all → reasoned
             ep.source_confidence = SourceConfidence.REASONED
-        # else: non-empty source that doesn't match any known pattern →
-        #       leave whatever the fetcher already set (may be REASONED, etc.)
     return episodes
 
 
 # ---------------------------------------------------------------------------
-# narrative_sort
+# Narrative sort (topological + date tiebreak)
 # ---------------------------------------------------------------------------
 
-
-def narrative_sort(
-    episodes: list[HistoricalEpisode],
-) -> list[HistoricalEpisode]:
-    """
-    Sort *episodes* into narrative order using Kahn's topological sort over
-    ``requires`` edges.  ``published_date`` is used only as a tiebreaker
-    within the same topological level (earlier dates first; ``None`` last).
-
-    Cycles are handled gracefully: any episode involved in a cycle is
-    appended after the acyclic portion, sorted by ``published_date`` only.
-    """
+def narrative_sort(episodes: list[HistoricalEpisode]) -> list[HistoricalEpisode]:
     ep_by_id: dict[str, HistoricalEpisode] = {ep.id: ep for ep in episodes}
     ids = list(ep_by_id.keys())
 
-    # Build adjacency list and in-degree map restricted to known IDs
     in_degree: dict[str, int] = {eid: 0 for eid in ids}
-    dependents: dict[str, list[str]] = defaultdict(list)  # id → list of ids that require it
+    dependents: dict[str, list[str]] = defaultdict(list)
 
     for ep in episodes:
         for req in ep.requires:
@@ -455,65 +306,34 @@ def narrative_sort(
 
     def _date_key(eid: str):
         d = ep_by_id[eid].published_date
-        # None dates sort last
         return (1, date.min) if d is None else (0, d)
 
-    # Seed queue with zero-in-degree nodes, ordered by published_date as tiebreaker
     queue: deque[str] = deque(
         sorted([eid for eid in ids if in_degree[eid] == 0], key=_date_key)
     )
-
     sorted_ids: list[str] = []
+
     while queue:
-        # Take the next node; tiebreaking is already baked in via sorted seeding
-        # and re-insertion below.
         current = queue.popleft()
         sorted_ids.append(current)
-
-        # Collect newly freed nodes and insert them sorted by date
         newly_free = []
         for dep in dependents[current]:
             in_degree[dep] -= 1
             if in_degree[dep] == 0:
                 newly_free.append(dep)
-
         if newly_free:
-            # Sort new free nodes by date and merge into the front of the queue
-            newly_free.sort(key=_date_key)
-            # Rebuild queue: prepend newly_free, respecting existing ordering
-            new_queue: deque[str] = deque(newly_free)
-            # Re-sort the combined front for correct tiebreaking
-            combined = sorted(list(new_queue) + list(queue), key=_date_key)
+            combined = sorted(list(deque(newly_free)) + list(queue), key=_date_key)
             queue = deque(combined)
 
-    # Any remaining nodes with in_degree > 0 are part of a cycle
     cyclic_ids = [eid for eid in ids if eid not in set(sorted_ids)]
     if cyclic_ids:
-        logger.warning(
-            "narrative_sort: cycle detected among episode IDs %s; "
-            "falling back to date-only sort for these nodes",
-            cyclic_ids,
-        )
         cyclic_ids.sort(key=_date_key)
         sorted_ids.extend(cyclic_ids)
 
     return [ep_by_id[eid] for eid in sorted_ids]
 
 
-# ---------------------------------------------------------------------------
-# fetch_with_retry
-# ---------------------------------------------------------------------------
-
-
 async def fetch_with_retry(fetch_fn: Callable, max_attempts: int = 3):
-    """
-    Call ``await fetch_fn()`` up to *max_attempts* times, retrying only on
-    :exc:`TransientFetchError`.
-
-    Backoff schedule (0-indexed attempt *k*): ``asyncio.sleep(2 ** k)``
-    — i.e., 1 s before attempt 1, 2 s before attempt 2.
-    No third-party retry libraries (tenacity etc.) are used.
-    """
     for attempt in range(max_attempts):
         try:
             return await fetch_fn()
@@ -527,11 +347,16 @@ async def fetch_with_retry(fetch_fn: Callable, max_attempts: int = 3):
 # IngestionAgent
 # ---------------------------------------------------------------------------
 
-
 class IngestionAgent:
     """
-    Orchestrates topic decomposition, source fetching, Track A ingestion,
-    and self-check recall to produce a list of HistoricalEpisode objects.
+    Graph-builder-driven ingestion.
+
+    Step 1: graph_builder discovers concepts via OpenAlex + LLM
+    Step 2: fetch Wikipedia + arXiv per concept (parallel)
+    Step 3: extract episodes
+    Step 4: wire requires[] from graph edges
+    Step 5: narrative_sort
+    Step 6: write to memory
     """
 
     def __init__(self) -> None:
@@ -542,273 +367,113 @@ class IngestionAgent:
         topic: str,
         video_ids: list[str] | None = None,
     ) -> list[HistoricalEpisode]:
-        """
-        Full pipeline:
-        1. decompose_topic → subtopics
-        2. For each subtopic: fetch_wikipedia + fetch_arxiv
-        3. Optionally fetch_youtube
-        4. tag_source_confidence(all_episodes)
-        5. narrative_sort(all_episodes) → sorted_episodes
-        6. Retry loop (max 3 attempts):
-           a. gateway.add_data_points(sorted_episodes, temporal_cognify=True)
-           b. cognee.consolidate_entity_descriptions_pipeline()
-           c. self_check_recall(topic) → if True, break; else continue
-        7. If all 3 attempts fail: reasoned_fallback(subtopics)
-        8. Return final episodes list
-        """
-        import cognee  # noqa: PLC0415 — imported here; config already applied above
+        import cognee  # noqa: PLC0415
 
+        logger.info("=" * 70)
         logger.info("IngestionAgent.run: topic=%r", topic)
-        subtopics = await decompose_topic(topic)
-        logger.info("Decomposed %r into %d subtopics: %s", topic, len(subtopics), subtopics)
+        logger.info("=" * 70)
 
+        # ------------------------------------------------------------------
+        # Step 1: discover curriculum via graph_builder
+        # ------------------------------------------------------------------
+        logger.info("STEP 1: Graph builder — discovering dependency graph")
+        try:
+            nodes, prereqs = await discover_curriculum(topic)
+        except Exception as exc:
+            logger.warning("Graph builder failed (%s); falling back to topic only", exc)
+            nodes = [topic]
+            prereqs = {topic: []}
+
+        logger.info("Curriculum order (%d concepts): %s", len(nodes), nodes)
+
+        # ------------------------------------------------------------------
+        # Step 2: fetch Wikipedia + arXiv per concept in parallel
+        # ------------------------------------------------------------------
+        logger.info("STEP 2: Fetching Wikipedia + arXiv for %d concepts", len(nodes))
+
+        async def fetch_concept(concept: str) -> list[HistoricalEpisode]:
+            wiki_task = fetch_wikipedia(concept)
+            arxiv_task = fetch_arxiv(concept)
+            wiki_eps, arxiv_eps = await asyncio.gather(wiki_task, arxiv_task, return_exceptions=True)
+            eps = []
+            if isinstance(wiki_eps, list):
+                eps.extend(wiki_eps)
+            if isinstance(arxiv_eps, list):
+                eps.extend(arxiv_eps)
+            logger.info("  %s → %d episodes", concept, len(eps))
+            return eps
+
+        # Fetch all concepts concurrently (but throttle to avoid overwhelming APIs)
+        semaphore = asyncio.Semaphore(3)
+
+        async def throttled_fetch(concept: str) -> list[HistoricalEpisode]:
+            async with semaphore:
+                return await fetch_concept(concept)
+
+        results = await asyncio.gather(*[throttled_fetch(c) for c in nodes])
+
+        # Flatten: map concept → its episodes (first episode = canonical for wiring)
         all_episodes: list[HistoricalEpisode] = []
-        for subtopic in subtopics:
-            wiki_episodes = await fetch_wikipedia(subtopic)
-            all_episodes.extend(wiki_episodes)
-            logger.info(
-                "Wikipedia returned %d episode(s) for subtopic %r",
-                len(wiki_episodes),
-                subtopic,
-            )
+        concept_to_first_ep_id: dict[str, str] = {}
 
-            arxiv_episodes = await fetch_arxiv(subtopic)
-            all_episodes.extend(arxiv_episodes)
-            logger.info(
-                "arXiv returned %d episode(s) for subtopic %r",
-                len(arxiv_episodes),
-                subtopic,
-            )
+        for concept, eps in zip(nodes, results):
+            if eps:
+                concept_to_first_ep_id[concept] = eps[0].id
+            all_episodes.extend(eps)
 
-        if video_ids:
-            youtube_episodes = await fetch_youtube(video_ids)
-            all_episodes.extend(youtube_episodes)
-            logger.info(
-                "YouTube returned %d episode(s) for %d video(s)",
-                len(youtube_episodes),
-                len(video_ids),
-            )
+        logger.info("Total episodes before wiring: %d", len(all_episodes))
 
-        # Tag and sort
+        # ------------------------------------------------------------------
+        # Step 3: wire requires[] from graph edges
+        # ------------------------------------------------------------------
+        logger.info("STEP 3: Wiring requires[] from graph edges")
+        for concept, prereq_concepts in prereqs.items():
+            # Find episodes belonging to this concept
+            concept_eps = [ep for ep in all_episodes if ep.concept.lower() == concept.lower()]
+            prereq_ids = [
+                concept_to_first_ep_id[p]
+                for p in prereq_concepts
+                if p in concept_to_first_ep_id
+            ]
+            for ep in concept_eps:
+                if prereq_ids:
+                    ep.requires = prereq_ids
+            if prereq_ids:
+                logger.info("  '%s' requires %s", concept, prereq_ids)
+
+        # ------------------------------------------------------------------
+        # Step 4: tag + sort
+        # ------------------------------------------------------------------
         tag_source_confidence(all_episodes)
         sorted_episodes = narrative_sort(all_episodes)
 
-        # Retry loop — up to 3 total attempts to write and verify recall
-        _MAX_ATTEMPTS = 3
-        recalled = False
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            logger.info(
-                "IngestionAgent.run: write attempt %d/%d for topic %r",
-                attempt, _MAX_ATTEMPTS, topic,
-            )
+        logger.info("=" * 70)
+        logger.info("CURRICULUM ORDER (%d episodes):", len(sorted_episodes))
+        for i, ep in enumerate(sorted_episodes, 1):
+            req_str = f" ← {len(ep.requires)} prereq(s)" if ep.requires else ""
+            logger.info("  %2d. [%s] %s%s", i, ep.source_confidence.value[:6], ep.concept, req_str)
+        logger.info("=" * 70)
+
+        # ------------------------------------------------------------------
+        # Step 5: write to memory (skip on Cognee error)
+        # ------------------------------------------------------------------
+        logger.info("STEP 5: Writing to memory (skipping on error)")
+        try:
             await self.gateway.add_data_points(sorted_episodes, temporal_cognify=True)
-
-            try:
-                await cognee.consolidate_entity_descriptions_pipeline()
-            except AttributeError:
-                logger.warning(
-                    "cognee.consolidate_entity_descriptions_pipeline() is not available "
-                    "in the installed version; skipping."
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "consolidate_entity_descriptions_pipeline raised an unexpected error: %s",
-                    exc,
-                )
-
-            recalled = await self.self_check_recall(topic)
-            if recalled:
-                logger.info(
-                    "IngestionAgent.run: recall verified on attempt %d for topic %r",
-                    attempt, topic,
-                )
-                break
-            else:
-                logger.warning(
-                    "IngestionAgent.run: recall check failed on attempt %d for topic %r",
-                    attempt, topic,
-                )
-
-        if not recalled:
-            logger.warning(
-                "IngestionAgent.run: all %d recall attempts failed for topic %r; "
-                "running reasoned_fallback",
-                _MAX_ATTEMPTS, topic,
-            )
-            fallback_episodes = await self.reasoned_fallback(subtopics)
-            sorted_episodes = sorted_episodes + fallback_episodes
+            await cognee.consolidate_entity_descriptions_pipeline()
+        except Exception as exc:
+            logger.warning("Memory write skipped: %s", exc)
 
         return sorted_episodes
 
-    # ------------------------------------------------------------------
-    # self_check_recall
-    # ------------------------------------------------------------------
-
     async def self_check_recall(self, topic: str) -> bool:
-        """Call cognee.recall() to verify ingested episodes are surfaced."""
         try:
-            import cognee  # noqa: PLC0415
+            import cognee
             results = await cognee.recall(topic)
             return bool(results)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("self_check_recall failed for %r: %s", topic, exc)
+        except Exception as exc:
+            logger.warning("self_check_recall failed: %s", exc)
             return False
-
-    # ------------------------------------------------------------------
-    # reasoned_fallback
-    # ------------------------------------------------------------------
-
-    async def reasoned_fallback(
-        self, subtopics: list[str]
-    ) -> list[HistoricalEpisode]:
-        """
-        Generate ``reasoned``-tier HistoricalEpisode objects for subtopics
-        that have no existing reasoned coverage in cognee.
-
-        For each subtopic:
-        1. Pre-check: if cognee.recall(subtopic) returns any results whose
-           source_confidence is REASONED, skip that subtopic (avoid duplication).
-        2. Otherwise, use the LLM to generate 1-3 reasoned episodes.
-        3. Tag all generated episodes with source_confidence=SourceConfidence.REASONED.
-        4. Write the batch to Track A via gateway.add_data_points.
-        5. Return the full list of generated episodes.
-        """
-        import cognee  # noqa: PLC0415
-
-        generated: list[HistoricalEpisode] = []
-
-        for subtopic in subtopics:
-            # Pre-check: skip if reasoned episodes already exist
-            try:
-                existing = await cognee.recall(subtopic)
-                has_reasoned = any(
-                    getattr(item, "source_confidence", None) == SourceConfidence.REASONED
-                    or getattr(item, "source_confidence", None) == "reasoned"
-                    for item in (existing or [])
-                )
-                if has_reasoned:
-                    logger.info(
-                        "reasoned_fallback: reasoned episodes already exist for %r; skipping",
-                        subtopic,
-                    )
-                    continue
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "reasoned_fallback: pre-check recall failed for %r: %s; proceeding anyway",
-                    subtopic, exc,
-                )
-
-            # Generate episodes via LLM
-            system_prompt = (
-                "You are a first-principles reasoning assistant. "
-                "Given a technical or scientific subtopic, reason from first principles "
-                "to construct plausible historical problem-solving episodes IN CHRONOLOGICAL ORDER.\n\n"
-                "Respond with ONLY a JSON array (no markdown, no extra text) of 1–3 objects, "
-                "each with these fields:\n"
-                '  "concept": str\n'
-                '  "problem_posed": str\n'
-                '  "attempted_solution": str\n'
-                '  "outcome": "success" | "failure" | "partial"\n'
-                '  "why": str\n'
-                '  "published_date": "YYYY-MM-DD" or null\n'
-                '  "requires": list[str] — concept names of episodes in this array that must '
-                "come before this one. Empty list [] if foundational.\n"
-                '  "concurrent_with": list[str] — concept names of episodes that happened in '
-                "parallel with no prerequisite relationship. Empty list [] if none.\n\n"
-                "These are reasoned reconstructions, not sourced facts."
-            )
-            user_prompt = (
-                f"Subtopic: {subtopic}\n\n"
-                "Generate 1–3 first-principles problem-solving episodes as a JSON array, "
-                "in chronological order."
-            )
-
-            try:
-                response = await litellm.acompletion(
-                    model=_LLM_MODEL,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.4,
-                )
-                content: str = response.choices[0].message.content or ""
-                content = content.strip()
-                if content.startswith("```"):
-                    content = content.split("```")[1]
-                    if content.startswith("json"):
-                        content = content[4:]
-                    content = content.strip()
-
-                raw_episodes = json.loads(content)
-                if not isinstance(raw_episodes, list):
-                    raise ValueError("Expected a JSON array")
-
-                slug = subtopic.lower().replace(" ", "_")
-                # Build concept→id map for cross-reference resolution
-                concept_to_id_fb: dict[str, str] = {}
-                for i, ep in enumerate(raw_episodes):
-                    ep_id = f"reasoned_{slug}_{uuid.uuid4().hex[:8]}_{i}"
-                    concept_to_id_fb[ep.get("concept", subtopic)] = ep_id
-
-                def _resolve_fb(refs: list) -> list[str]:
-                    return [concept_to_id_fb.get(r, r) for r in refs if isinstance(r, str)]
-
-                for i, ep in enumerate(raw_episodes):
-                    ep_id = list(concept_to_id_fb.values())[i]
-                    episode = HistoricalEpisode(
-                        id=ep_id,
-                        concept=ep.get("concept", subtopic),
-                        problem_posed=ep.get("problem_posed", ""),
-                        attempted_solution=ep.get("attempted_solution", ""),
-                        outcome=_parse_outcome(ep.get("outcome", "partial")),
-                        why=ep.get("why", ""),
-                        requires=_resolve_fb(ep.get("requires", [])),
-                        concurrent_with=_resolve_fb(ep.get("concurrent_with", [])),
-                        source_confidence=SourceConfidence.REASONED,
-                        source=None,
-                        published_date=_parse_date(ep.get("published_date")),
-                    )
-                    generated.append(episode)
-                    logger.info(
-                        "reasoned_fallback: generated episode %r for subtopic %r",
-                        episode.id, subtopic,
-                    )
-
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "reasoned_fallback: LLM generation failed for subtopic %r: %s",
-                    subtopic, exc,
-                )
-                # Minimal fallback episode so the pipeline never returns empty-handed
-                generated.append(
-                    HistoricalEpisode(
-                        id=f"reasoned_{subtopic.lower().replace(' ', '_')}_{uuid.uuid4().hex[:8]}",
-                        concept=subtopic,
-                        problem_posed=f"Understanding {subtopic} from first principles",
-                        attempted_solution=(
-                            f"Reasoned reconstruction of the foundational challenges in {subtopic}."
-                        ),
-                        outcome=Outcome.PARTIAL,
-                        why="Generated via reasoned fallback; LLM was unavailable.",
-                        source_confidence=SourceConfidence.REASONED,
-                        source=None,
-                    )
-                )
-
-        if generated:
-            try:
-                await self.gateway.add_data_points(generated, temporal_cognify=True)
-                logger.info(
-                    "reasoned_fallback: wrote %d reasoned episode(s) to Track A",
-                    len(generated),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "reasoned_fallback: failed to write episodes to Track A: %s", exc
-                )
-
-        return generated
 
 
 # ---------------------------------------------------------------------------
