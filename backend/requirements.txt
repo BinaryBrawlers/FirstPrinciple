@@ -12,3 +12,4 @@ pytest
 pytest-asyncio
 mistral-common[sentencepiece]
 mistralai
+instructor==1.15.4
